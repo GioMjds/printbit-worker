@@ -9,11 +9,12 @@ namespace PrintBit.Application.Queues
 
         public HardwareEventQueue()
         {
-            _channel = Channel.CreateUnbounded<Esp32Message>(
-                new UnboundedChannelOptions
+            _channel = Channel.CreateBounded<Esp32Message>(
+                new BoundedChannelOptions(capacity: 1024)
                 {
                     SingleReader = true,
                     SingleWriter = false,
+                    FullMode = BoundedChannelFullMode.Wait
                 });
         }
 

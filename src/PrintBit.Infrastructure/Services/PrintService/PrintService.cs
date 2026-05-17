@@ -19,6 +19,18 @@ public class PrintService : IPrintService
         PrintJobRequest request,
         CancellationToken cancellationToken = default)
     {
+        if (request is null) 
+            throw new ArgumentNullException(nameof(request));
+
+        if (string.IsNullOrWhiteSpace(request.FilePath))
+            return new PrintJobResult { Success = false, Message = "File path is required." };
+
+        if (string.IsNullOrWhiteSpace(request.PrinterName))
+            return new PrintJobResult { Success = false, Message = "PrinterName is required" };
+
+        if (request.Copies <= 0)
+            return new PrintJobResult { Success = false, Message = "Copies must be greater than zero" };
+
         await PrintLock.WaitAsync(cancellationToken);
 
         try
@@ -27,25 +39,26 @@ public class PrintService : IPrintService
                 "Starting print job for file: {file}",
                 request.FilePath);
 
-            var process = new Process();
-
-            process.StartInfo = new ProcessStartInfo
+            using var process = new Process
             {
-                FileName = "SumatraPDF.exe",
-
-                Arguments =
-                    $"-print-to \"{request.PrinterName}\" " +
-                    $"\"{request.FilePath}\"",
-
-                CreateNoWindow = true,
-
-                UseShellExecute = false
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "SumatraPDF.exe",
+                    Arguments =
+                        $"-print-to \"{request.PrinterName}\" " +
+                        $"-print-settings \"{request.Copies}\" " +
+                        $"\"{request.FilePath}\"",
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                }
             };
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(2)); // Set a timeout for the print job
 
             process.Start();
 
-            await process.WaitForExitAsync(
-                cancellationToken);
+            await process.WaitForExitAsync(timeoutCts.Token);
 
             if (process.ExitCode != 0)
             {

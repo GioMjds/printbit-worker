@@ -29,29 +29,30 @@ public class StartPrintHandler
         StartPrintEvent evt,
         CancellationToken cancellationToken = default)
     {
-        _stateMachine.StartPrinting();
-
-        var result = await _printService.PrintAsync(
-            new PrintJobRequest
-            {
-                FilePath = evt.FilePath,
-
-                PrinterName = "EPSON L5290 Series"
-            },
-            cancellationToken);
-
-        if (!result.Success)
+        try
         {
-            _logger.LogError(
-                "Print failed: {message}",
-                result.Message);
-
-            return;
+            _stateMachine.StartPrinting();
+            var result = await _printService.PrintAsync(
+                new PrintJobRequest
+                {
+                    FilePath = evt.FilePath,
+                    PrinterName = "EPSON L5290 Series"
+                },
+                cancellationToken);
+            if (!result.Success)
+            {
+                _logger.LogError("Print failed: {message}", result.Message);
+                _stateMachine.Reset();
+                return;
+            }
+            _stateMachine.Complete();
+            _logger.LogInformation("Print transaction completed");
         }
-
-        _stateMachine.Complete();
-
-        _logger.LogInformation(
-            "Print transaction completed");
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Print transaction failed with exception");
+            _stateMachine.Reset();
+            throw;
+        }
     }
 }

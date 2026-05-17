@@ -35,6 +35,8 @@ public class HardwareOrchestrator
     public async Task HandleEsp32MessageAsync(
         Esp32Message message)
     {
+        var shouldStartPrint = false;
+
         _logger.LogInformation(
             "Orchestrator received: {type}",
             message.Type);
@@ -48,12 +50,12 @@ public class HardwareOrchestrator
                     {
                         Amount = message.Value ?? 0
                     });
+                shouldStartPrint = _stateMachine.CurrentState == TransactionState.ReadyToPrint;
 
                 break;
         }
 
-        if (_stateMachine.CurrentState ==
-            TransactionState.ReadyToPrint)
+        if (shouldStartPrint)
         {
             await _printHandler.HandleAsync(
                 new StartPrintEvent
