@@ -5,6 +5,7 @@ using PrintBit.Application.Queues;
 using PrintBit.Hardware.Devices.ESP32;
 using PrintBit.HardwareService;
 using PrintBit.HardwareService.Services;
+using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.SerialService;
 using PrintBit.Infrastructure.Services.WatchdogService;
 using PrintBit.Infrastructure.Services.PrintService;
@@ -17,6 +18,8 @@ builder.Services.Configure<HardwareSettings>(builder.Configuration.GetSection("H
 builder.Services.AddHostedService<Worker>();
 
 builder.Services.AddHostedService<HardwareProcessingService>();
+
+builder.Services.AddHostedService<NamedPipeHostedService>();
 
 builder.Services.AddSingleton<ISerialConnection, SerialConnection>();
 
@@ -35,6 +38,8 @@ builder.Services.AddSingleton<CoinInsertedHandler>();
 builder.Services.AddSingleton<HardwareOrchestrator>();
 
 builder.Services.AddSingleton<HardwareEventQueue>();
+
+builder.Services.AddSingleton<INamedPipeServer, NamedPipeServer>();
 
 var host = builder.Build();
 

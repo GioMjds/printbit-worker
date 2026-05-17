@@ -3,6 +3,7 @@ using PrintBit.Application.Events;
 using PrintBit.Application.Handlers;
 using PrintBit.Application.StateMachine;
 using PrintBit.Hardware.Devices.ESP32;
+using PrintBit.Infrastructure.IPC;
 using PrintBit.Shared.Enums;
 
 namespace PrintBit.Application.Services;
@@ -17,11 +18,14 @@ public class HardwareOrchestrator
 
     private readonly TransactionStateMachine _stateMachine;
 
+    private readonly INamedPipeServer _pipeServer;
+
     public HardwareOrchestrator(
         ILogger<HardwareOrchestrator> logger,
         CoinInsertedHandler coinHandler,
         StartPrintHandler printHandler,
-        TransactionStateMachine stateMachine)
+        TransactionStateMachine stateMachine,
+        INamedPipeServer pipeServer)
     {
         _logger = logger;
 
@@ -30,6 +34,8 @@ public class HardwareOrchestrator
         _printHandler = printHandler;
 
         _stateMachine = stateMachine;
+
+        _pipeServer = pipeServer;
     }
 
     public async Task HandleEsp32MessageAsync(
@@ -49,6 +55,13 @@ public class HardwareOrchestrator
                     new CoinInsertedEvent
                     {
                         Amount = message.Value ?? 0
+                    });
+
+                await _pipeServer.BroadcastAsync(
+                    new PipeMessage
+                    {
+                        Type = PipeMessageType.CoinInserted,
+                        Payload = $"{{\"amount\":{message.Value}}}"
                     });
                 shouldStartPrint = _stateMachine.CurrentState == TransactionState.ReadyToPrint;
 
