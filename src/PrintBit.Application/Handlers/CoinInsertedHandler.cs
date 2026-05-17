@@ -1,12 +1,29 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using Microsoft.Extensions.Logging;
+using PrintBit.Application.Events;
+using PrintBit.Application.StateMachine;
 
-namespace PrintBit.Application.Handlers
+namespace PrintBit.Application.Handlers;
+
+public class CoinInsertedHandler
 {
-    internal class CoinInsertedHandler
+    private readonly ILogger<CoinInsertedHandler> _logger;
+
+    private readonly TransactionStateMachine _stateMachine;
+
+    public CoinInsertedHandler(
+        ILogger<CoinInsertedHandler> logger,
+        TransactionStateMachine stateMachine)
     {
-        // This handler would be responsible for handling the event when a coin is inserted into the machine.
-        // Must work within the coin acceptor (that is pin connected in ESP32) and update the confirm UI in real-time.
+        _logger = logger;
+        _stateMachine = stateMachine;
+    }
+
+    public void Handle(CoinInsertedEvent evt)
+    {
+        _logger.LogInformation(
+            "Handling coin inserted event: {amount}",
+            evt.Amount);
+
+        _stateMachine.InsertCoin(evt.Amount);
     }
 }

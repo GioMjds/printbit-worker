@@ -2,9 +2,9 @@
 using System.Collections.Generic;
 using System.Text;
 
-namespace PrintBit.Hardware.Devices.ESP32
+namespace PrintBit.Application.Events
 {
-    internal class Esp32Response
+    internal class HardwareHeartbeatEvent
     {
     }
 }

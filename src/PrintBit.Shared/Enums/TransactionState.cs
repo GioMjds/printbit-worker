@@ -1,10 +1,12 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace PrintBit.Shared.Enums;
 
-namespace PrintBit.Shared.Enums
+public enum TransactionState
 {
-    internal class TransactionState
-    {
-    }
+    Idle = 0,
+    WaitingForCoins,
+    ReadyToPrint,
+    Printing,
+    DispensingChange,
+    Completed,
+    Error
 }
