@@ -1,4 +1,6 @@
-﻿namespace PrintBit.Infrastructure.Services.WatchdogService;
+﻿using Microsoft.Extensions.Logging;
+
+namespace PrintBit.Infrastructure.Services.WatchdogService;
 
 public class WatchdogService
 {

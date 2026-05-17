@@ -1,10 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace PrintBit.Hardware.Devices.ESP32
+﻿namespace PrintBit.Hardware.Devices.ESP32
 {
-    internal class IESP32Device
+    public interface IEsp32Device
     {
+        bool IsConnected { get; }
+        void Connect(string portName, int baudRate);
+        void Disconnect();
+        void SendCommand(string command);
+        event EventHandler<Esp32Message>? MessageReceived;
     }
 }
