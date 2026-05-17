@@ -7,8 +7,7 @@ namespace PrintBit.Infrastructure.Services.PrintService;
 
 public class PrintService : IPrintService
 {
-    private static readonly SemaphoreSlim PrintLock =
-        new(1, 1);
+    private static readonly SemaphoreSlim PrintLock = new(1, 1);
 
     private readonly ILogger<PrintService> _logger;
 

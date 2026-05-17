@@ -41,6 +41,8 @@ builder.Services.AddSingleton<HardwareEventQueue>();
 
 builder.Services.AddSingleton<INamedPipeServer, NamedPipeServer>();
 
+builder.Services.AddSingleton<IPrintRecoveryService, PrintRecoveryService>();
+
 var host = builder.Build();
 
 host.Run();
