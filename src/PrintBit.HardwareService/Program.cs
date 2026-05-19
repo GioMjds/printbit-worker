@@ -10,6 +10,7 @@ using PrintBit.Infrastructure.Services.SerialService;
 using PrintBit.Infrastructure.Services.WatchdogService;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
+using PrintBit.Infrastructure.Windows.PrinterMonitoring;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -20,6 +21,10 @@ builder.Services.AddHostedService<Worker>();
 builder.Services.AddHostedService<HardwareProcessingService>();
 
 builder.Services.AddHostedService<NamedPipeHostedService>();
+
+builder.Services.AddHostedService<PrintQueueWatcherService>();
+
+builder.Services.AddHostedService<PrinterMonitorService>();
 
 builder.Services.AddSingleton<ISerialConnection, SerialConnection>();
 
