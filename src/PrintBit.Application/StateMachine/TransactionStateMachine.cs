@@ -12,7 +12,7 @@ public class TransactionStateMachine
     public TransactionState CurrentState { get; private set; }
         = TransactionState.Idle;
 
-    public decimal CurrentBalance { get; private set; }
+    public decimal CurrentBalance { get; private set; } 
 
     public string? LastFailureReason { get; private set; }
 

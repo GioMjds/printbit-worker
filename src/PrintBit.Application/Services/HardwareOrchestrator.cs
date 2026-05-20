@@ -64,12 +64,20 @@ public class HardwareOrchestrator
 
                 if (_stateMachine.CurrentState == TransactionState.ReadyToPrint)
                 {
-                    await HandlePrintRequestAsync(
-                        new StartPrintEvent
+                    await _pipeServer.BroadcastAsync(
+                        new PipeMessage
                         {
-                            FilePath = @"C:\PrintBit\sample.pdf"
-                        },
-                        source: "esp32");
+                            Type = PipeMessageType.TransactionStatus,
+                            Payload = JsonSerializer.Serialize(
+                                new
+                                {
+                                    state = _stateMachine.CurrentState.ToString(),
+                                    balance = _stateMachine.CurrentBalance
+                                })
+                        });
+
+                    _logger.LogInformation(
+                        "Transaction is ready. Waiting for explicit print confirmation trigger.");
                 }
 
                 break;
