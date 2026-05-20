@@ -7,5 +7,7 @@
     <Project Path="src/PrintBit.Infrastructure/PrintBit.Infrastructure.csproj" />
     <Project Path="src/PrintBit.Shared/PrintBit.Shared.csproj" />
   </Folder>
-  <Folder Name="/tests/" />
+  <Folder Name="/tests/">
+    <Project Path="tests/PrintBit.Tests/PrintBit.Tests.csproj" />
+  </Folder>
 </Solution>

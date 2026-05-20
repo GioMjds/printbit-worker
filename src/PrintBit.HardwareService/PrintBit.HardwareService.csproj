@@ -19,7 +19,7 @@
   <ItemGroup>
     <ProjectReference Include="..\PrintBit.Application\PrintBit.Application.csproj" />
     <ProjectReference Include="..\PrintBit.Infrastructure\PrintBit.Infrastructure.csproj" />
-    <ProjectReference Include="..\..\PrintBit.Infrastructure.Windows\PrintBit.Infrastructure.Windows.csproj" />
+    <ProjectReference Include="..\PrintBit.Infrastructure.Windows\PrintBit.Infrastructure.Windows.csproj" />
     <ProjectReference Include="..\PrintBit.Hardware\PrintBit.Hardware.csproj" />
     <ProjectReference Include="..\PrintBit.Shared\PrintBit.Shared.csproj" />
   </ItemGroup>

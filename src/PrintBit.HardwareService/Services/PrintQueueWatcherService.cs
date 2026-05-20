@@ -1,6 +1,6 @@
-﻿using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Options;
 using PrintBit.Application.Events;
-using PrintBit.Application.Handlers;
+using PrintBit.Application.Services;
 using PrintBit.Shared.Configurations;
 
 namespace PrintBit.HardwareService.Services;
@@ -11,40 +11,31 @@ public class PrintQueueWatcherService : BackgroundService
 
     private readonly ILogger<PrintQueueWatcherService> _logger;
 
-    private readonly StartPrintHandler _printHandler;
+    private readonly HardwareOrchestrator _orchestrator;
 
     private readonly HardwareSettings _settings;
 
     public PrintQueueWatcherService(
         ILogger<PrintQueueWatcherService> logger,
-        StartPrintHandler printHandler,
+        HardwareOrchestrator orchestrator,
         IOptions<HardwareSettings> options)
     {
         _logger = logger;
-
-        _printHandler = printHandler;
-
+        _orchestrator = orchestrator;
         _settings = options.Value;
     }
 
     protected override async Task ExecuteAsync(
         CancellationToken stoppingToken)
     {
-        var queueDirectory =
-            Path.Combine(
-                AppContext.BaseDirectory,
-                "queue");
-
+        var queueDirectory = _settings.PrintQueueDirectory;
         var archiveDirectory =
             Path.Combine(
-                AppContext.BaseDirectory,
+                Path.GetDirectoryName(queueDirectory) ?? AppContext.BaseDirectory,
                 "archive");
 
-        Directory.CreateDirectory(
-            queueDirectory);
-
-        Directory.CreateDirectory(
-            archiveDirectory);
+        Directory.CreateDirectory(queueDirectory);
+        Directory.CreateDirectory(archiveDirectory);
 
         _logger.LogInformation(
             "Watching print queue: {path}",
@@ -54,10 +45,7 @@ public class PrintQueueWatcherService : BackgroundService
         {
             try
             {
-                var pdfFiles =
-                    Directory.GetFiles(
-                        queueDirectory,
-                        "*.pdf");
+                var pdfFiles = Directory.GetFiles(queueDirectory, "*.pdf");
 
                 foreach (var file in pdfFiles)
                 {
@@ -70,20 +58,28 @@ public class PrintQueueWatcherService : BackgroundService
 
                     try
                     {
-                        await Task.Delay(
-                            1000,
-                            stoppingToken);
+                        await Task.Delay(1000, stoppingToken);
 
                         _logger.LogInformation(
                             "Detected print file: {file}",
                             file);
 
-                        await _printHandler.HandleAsync(
+                        var accepted = await _orchestrator.HandlePrintRequestAsync(
                             new StartPrintEvent
                             {
                                 FilePath = file
                             },
-                            stoppingToken);
+                            source: "queue",
+                            cancellationToken: stoppingToken);
+
+                        if (!accepted)
+                        {
+                            _logger.LogWarning(
+                                "Queue print request rejected by transaction gate; file retained for retry: {file}",
+                                file);
+
+                            continue;
+                        }
 
                         var archivePath =
                             Path.Combine(
@@ -122,9 +118,7 @@ public class PrintQueueWatcherService : BackgroundService
                     "Queue watcher main loop failed");
             }
 
-            await Task.Delay(
-                2000,
-                stoppingToken);
+            await Task.Delay(2000, stoppingToken);
         }
     }
 }

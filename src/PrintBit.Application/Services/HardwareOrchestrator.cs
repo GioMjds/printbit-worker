@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using PrintBit.Application.Events;
 using PrintBit.Application.Handlers;
 using PrintBit.Application.StateMachine;
@@ -28,21 +29,15 @@ public class HardwareOrchestrator
         INamedPipeServer pipeServer)
     {
         _logger = logger;
-
         _coinHandler = coinHandler;
-
         _printHandler = printHandler;
-
         _stateMachine = stateMachine;
-
         _pipeServer = pipeServer;
     }
 
     public async Task HandleEsp32MessageAsync(
         Esp32Message message)
     {
-        var shouldStartPrint = false;
-
         _logger.LogInformation(
             "Orchestrator received: {type}",
             message.Type);
@@ -50,7 +45,6 @@ public class HardwareOrchestrator
         switch (message.Type)
         {
             case Esp32MessageType.CoinInserted:
-
                 _coinHandler.Handle(
                     new CoinInsertedEvent
                     {
@@ -61,20 +55,151 @@ public class HardwareOrchestrator
                     new PipeMessage
                     {
                         Type = PipeMessageType.CoinInserted,
-                        Payload = $"{{\"amount\":{message.Value}}}"
+                        Payload = JsonSerializer.Serialize(
+                            new
+                            {
+                                amount = message.Value
+                            })
                     });
-                shouldStartPrint = _stateMachine.CurrentState == TransactionState.ReadyToPrint;
+
+                if (_stateMachine.CurrentState == TransactionState.ReadyToPrint)
+                {
+                    await HandlePrintRequestAsync(
+                        new StartPrintEvent
+                        {
+                            FilePath = @"C:\PrintBit\sample.pdf"
+                        },
+                        source: "esp32");
+                }
 
                 break;
+            case Esp32MessageType.Heartbeat:
+                await _pipeServer.BroadcastAsync(
+                    new PipeMessage
+                    {
+                        Type = PipeMessageType.HardwareStatus,
+                        Payload = JsonSerializer.Serialize(
+                            new
+                            {
+                                heartbeat = true
+                            })
+                    });
+                break;
+            default:
+                _logger.LogDebug(
+                    "No orchestrator action configured for message type: {type}",
+                    message.Type);
+                break;
+        }
+    }
+
+    public async Task<bool> HandlePrintRequestAsync(
+        StartPrintEvent request,
+        string source,
+        CancellationToken cancellationToken = default)
+    {
+        if (_stateMachine.CurrentState != TransactionState.ReadyToPrint)
+        {
+            _logger.LogWarning(
+                "Rejected print request | Source={source} | State={state}",
+                source,
+                _stateMachine.CurrentState);
+
+            await _pipeServer.BroadcastAsync(
+                new PipeMessage
+                {
+                    Type = PipeMessageType.Error,
+                    Payload = JsonSerializer.Serialize(
+                        new
+                        {
+                            code = "PRINT_REJECTED",
+                            source,
+                            state = _stateMachine.CurrentState.ToString()
+                        })
+                },
+                cancellationToken);
+
+            return false;
         }
 
-        if (shouldStartPrint)
-        {
-            await _printHandler.HandleAsync(
-                new StartPrintEvent
+        await _pipeServer.BroadcastAsync(
+            new PipeMessage
+            {
+                Type = PipeMessageType.PrintStarted,
+                Payload = JsonSerializer.Serialize(
+                    new
+                    {
+                        source,
+                        file = request.FilePath
+                    })
+            },
+            cancellationToken);
+
+        await _printHandler.HandleAsync(
+            request,
+            cancellationToken);
+
+        var statusType =
+            _stateMachine.CurrentState == TransactionState.Success
+                ? PipeMessageType.PrintCompleted
+                : PipeMessageType.Error;
+
+        var payload = statusType == PipeMessageType.PrintCompleted
+            ? JsonSerializer.Serialize(
+                new
                 {
-                    FilePath = @"C:\PrintBit\sample.pdf"
+                    source,
+                    state = _stateMachine.CurrentState.ToString()
+                })
+            : JsonSerializer.Serialize(
+                new
+                {
+                    code = "PRINT_FAILED",
+                    source,
+                    state = _stateMachine.CurrentState.ToString(),
+                    reason = _stateMachine.LastFailureReason
                 });
+
+        await _pipeServer.BroadcastAsync(
+            new PipeMessage
+            {
+                Type = statusType,
+                Payload = payload
+            },
+            cancellationToken);
+
+        return true;
+    }
+
+    public async Task HandlePipeMessageAsync(
+        PipeMessage message,
+        CancellationToken cancellationToken = default)
+    {
+        if (message.Type != PipeMessageType.ResetTransactionRequest)
+        {
+            _logger.LogDebug(
+                "Ignoring unsupported pipe command: {type}",
+                message.Type);
+
+            return;
         }
+
+        _logger.LogInformation(
+            "Reset transaction requested by named pipe client");
+
+        _stateMachine.Reset();
+
+        await _pipeServer.BroadcastAsync(
+            new PipeMessage
+            {
+                Type = PipeMessageType.TransactionStatus,
+                Payload = JsonSerializer.Serialize(
+                    new
+                    {
+                        state = "Idle",
+                        balance = 0
+                    })
+            },
+            cancellationToken);
     }
 }

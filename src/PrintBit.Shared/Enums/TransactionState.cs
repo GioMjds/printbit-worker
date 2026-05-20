@@ -2,11 +2,12 @@
 
 public enum TransactionState
 {
-    Idle = 0,
-    WaitingForCoins,
+    Idle,
+    Pending,
     ReadyToPrint,
     Printing,
-    DispensingChange,
-    Completed,
-    Error
+    Verifying,
+    Success,
+    Failed,
+    HardwareError
 }

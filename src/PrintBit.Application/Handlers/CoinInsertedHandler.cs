@@ -24,6 +24,6 @@ public class CoinInsertedHandler
             "Handling coin inserted event: {amount}",
             evt.Amount);
 
-        _stateMachine.InsertCoin(evt.Amount);
+        _stateMachine.TryInsertCoin(evt.Amount);
     }
 }
