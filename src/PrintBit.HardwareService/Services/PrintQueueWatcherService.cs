@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Options;
-using PrintBit.Application.Events;
-using PrintBit.Application.Services;
+using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 
 namespace PrintBit.HardwareService.Services;
@@ -11,17 +10,17 @@ public class PrintQueueWatcherService : BackgroundService
 
     private readonly ILogger<PrintQueueWatcherService> _logger;
 
-    private readonly HardwareOrchestrator _orchestrator;
+    private readonly IPrintService _printService;
 
     private readonly HardwareSettings _settings;
 
     public PrintQueueWatcherService(
         ILogger<PrintQueueWatcherService> logger,
-        HardwareOrchestrator orchestrator,
+        IPrintService printService,
         IOptions<HardwareSettings> options)
     {
         _logger = logger;
-        _orchestrator = orchestrator;
+        _printService = printService;
         _settings = options.Value;
     }
 
@@ -64,21 +63,27 @@ public class PrintQueueWatcherService : BackgroundService
                             "Detected print file: {file}",
                             file);
 
-                        var accepted = await _orchestrator.HandlePrintRequestAsync(
-                            new StartPrintEvent
+                        var result = await _printService.PrintAsync(
+                            new PrintJobRequest
                             {
-                                FilePath = file
+                                FilePath = file,
+                                PrinterName = _settings.PrinterName
                             },
-                            source: "queue",
-                            cancellationToken: stoppingToken);
+                            stoppingToken);
 
-                        if (!accepted)
+                        if (!result.Success)
                         {
-                            _logger.LogWarning(
-                                "Queue print request rejected by transaction gate; file retained for retry: {file}",
+                            _logger.LogError(
+                                "Queue print failed | Stage={stage} | Message={message} | File={file}",
+                                result.FailureStage,
+                                result.Message,
                                 file);
-
-                            continue;
+                        }
+                        else
+                        {
+                            _logger.LogInformation(
+                                "Queue print succeeded: {file}",
+                                file);
                         }
 
                         var archivePath =
@@ -98,6 +103,10 @@ public class PrintQueueWatcherService : BackgroundService
                         _logger.LogInformation(
                             "File archived successfully");
                     }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
                     catch (Exception ex)
                     {
                         _logger.LogError(
@@ -110,6 +119,10 @@ public class PrintQueueWatcherService : BackgroundService
                         _processingFiles.Remove(file);
                     }
                 }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {

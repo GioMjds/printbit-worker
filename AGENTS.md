@@ -20,33 +20,34 @@
 
 ## 1. Project Identity & Domain Context
 
-**PrintBit** is a coin-operated self-service printing kiosk deployed on a Windows tablet in campus/institutional environments. This repository (`PrintBit.HardwareService`) is the .NET 10 Windows Service Worker that sits between the physical hardware layer and kiosk UI.
+**PrintBit** is a coin-operated self-service printing kiosk deployed on a Windows tablet in campus/institutional environments. This repository (`PrintBit.HardwareService`) is the .NET 10 Windows Service Worker focused on printer spooler orchestration and logging error messages from the Node.js app via named pipe.
 
 ### What this service is NOT
 
 - It is **not a web API**. There are no HTTP controllers and no REST endpoints.
-- It is **not stateless**. `TransactionStateMachine` is a singleton with mutable in-memory state.
-- It is **not safe to restart mid-transaction**. Restart during `Printing` or `Verifying` loses transactional continuity.
+- It does **not** handle ESP32 coin/hopper hardware at runtime (printer-only mode).
 
 ### What this service IS
 
-- A **hardware bridge**: reads serial data from ESP32, maps to domain events, drives the transaction state machine, dispatches print jobs.
+- A **printer bridge**: watches a print queue and dispatches print jobs through the Windows spooler.
 - A **Windows Service**: startup/shutdown sequencing matters.
-- A **real-time event processor**: coin pulses arrive asynchronously and are queued through `Channel<Esp32Message>`.
+- An **IPC sink**: logs error messages sent from the Node.js app over a named pipe.
 
 ### Why normal assumptions break here
 
 | Assumption | Reality in PrintBit |
 |---|---|
-| Services can be scoped per request | Hardware services are singleton; scoped/transient lifetimes can lose state or break DI assumptions. |
-| I/O failures are retryable | Serial disconnect is not auto-recovered; missed pulses are lost. |
+| Services can be scoped per request | Printer services are singleton; scoped/transient lifetimes can break job serialization. |
+| I/O failures are retryable | Spooler failures are not auto-recovered; log and investigate. |
 | Timeout can be tuned freely | 2-minute print timeout exists for slow Sumatra cold starts on tablets. |
-| State lives in a database | Transaction state is in-memory only. |
-| Logging is optional | Hardware debugging depends on logs for state, coin, and print outcomes. |
+| State lives in a database | Print pipeline state is in-memory only. |
+| Logging is optional | Printer debugging depends on logs for print outcomes and Node error payloads. |
 
 ---
 
 ## 2. Hardware Architecture Brief
+
+ESP32/coin/hopper paths are currently **not wired in the printer-only runtime**. The details below are retained for legacy context.
 
 ### Physical Wiring Overview
 
@@ -121,14 +122,17 @@ Critical constraints:
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
 - Any process or verification failure returns `Success = false` with stage detail.
 
-### Named Pipe Commands
+### Named Pipe (Node Error Intake)
 
-Pipe transport is JSON line-delimited through `INamedPipeServer`.
+`ErrorPipeHostedService` listens on a named pipe and logs **line-delimited JSON** error messages from the Node.js app.
 
-| `PipeMessageType` | Direction | Meaning |
+| Field | Required | Notes |
 |---|---|---|
-| `ResetTransactionRequest` | UI -> service | Explicit transaction reset command |
-| `CoinInserted`/`PrintStarted`/`PrintCompleted`/`Error`/`TransactionStatus` | service -> UI | Status and lifecycle notifications |
+| `message` | Yes | Error message to log |
+| `code` | No | Optional error code |
+| `source` | No | Source identifier (e.g., kiosk UI) |
+| `stack` | No | Optional stack trace |
+| `timestampUtc` | No | ISO-8601 timestamp |
 
 ---
 
@@ -151,19 +155,12 @@ Dependency direction:
 
 | Class | Project | Responsibility |
 |---|---|---|
-| `Worker` | HardwareService | Connects ESP32 and enqueues hardware events |
-| `HardwareProcessingService` | HardwareService | Drains queue and invokes `HardwareOrchestrator` |
-| `PrintQueueWatcherService` | HardwareService | Watches queue directory and routes print requests through orchestrator gate |
-| `NamedPipeHostedService` | HardwareService | Starts named-pipe server and forwards commands to orchestrator |
-| `HardwareOrchestrator` | Application | Handles ESP32 events, gates print starts, handles reset command |
-| `CoinInsertedHandler` | Application | Calls `TransactionStateMachine.TryInsertCoin()` |
-| `StartPrintHandler` | Application | Runs print lifecycle transitions and failure handling |
-| `TransactionStateMachine` | Application | Authoritative transaction state and balance |
-| `HardwareEventQueue` | Application | Bounded channel (`1024`, single reader) |
-| `Esp32Device` | Hardware | Serial message parser and command sender |
-| `SerialConnection` | Infrastructure | `System.IO.Ports.SerialPort` wrapper |
-| `NamedPipeServer` | Infrastructure | In/out named-pipe server, broadcasts and inbound message dispatch |
+| `PrintQueueWatcherService` | HardwareService | Watches queue directory and invokes `IPrintService` directly |
+| `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
+| `PrinterMonitorService` | Infrastructure.Windows | Logs printer status and job info from Windows spooler |
 | `PrintService` | Infrastructure | Sumatra process + spooler verification + print lock |
+
+Legacy ESP32/orchestrator classes remain in the codebase but are not wired in the printer-only runtime.
 
 ### DI Registration (Program.cs)
 
@@ -172,24 +169,15 @@ All hardware services are singleton.
 ```csharp
 builder.Services.Configure<HardwareSettings>(
     builder.Configuration.GetSection("HardwareSettings"));
+builder.Services.Configure<IpcSettings>(
+    builder.Configuration.GetSection("IpcSettings"));
 
-builder.Services.AddHostedService<Worker>();
-builder.Services.AddHostedService<HardwareProcessingService>();
-builder.Services.AddHostedService<NamedPipeHostedService>();
 builder.Services.AddHostedService<PrintQueueWatcherService>();
+builder.Services.AddHostedService<ErrorPipeHostedService>();
 builder.Services.AddHostedService<PrinterMonitorService>();
 
-builder.Services.AddSingleton<ISerialConnection, SerialConnection>();
-builder.Services.AddSingleton<IEsp32Device, Esp32Device>();
 builder.Services.AddSingleton<IPrintService, PrintService>();
 builder.Services.AddSingleton<IPrintRecoveryService, PrintRecoveryService>();
-builder.Services.AddSingleton<StartPrintHandler>();
-builder.Services.AddSingleton<WatchdogService>();
-builder.Services.AddSingleton<TransactionStateMachine>();
-builder.Services.AddSingleton<CoinInsertedHandler>();
-builder.Services.AddSingleton<HardwareOrchestrator>();
-builder.Services.AddSingleton<HardwareEventQueue>();
-builder.Services.AddSingleton<INamedPipeServer, NamedPipeServer>();
 ```
 
 ### Configuration
@@ -205,23 +193,25 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "PrintTimeoutSeconds": 120,
     "PrinterName": "EPSON L5290 Series",
     "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue"
+  },
+  "IpcSettings": {
+    "PipeName": "printbit-node-errors",
+    "MaxMessageBytes": 8192
   }
 }
 ```
 
 ### Queue Design
 
-`HardwareEventQueue` uses:
-- `BoundedChannelOptions(capacity: 1024)`
-- `SingleReader = true`
-- `SingleWriter = false`
-- `FullMode = BoundedChannelFullMode.Wait`
+`HardwareEventQueue` remains in the codebase for the legacy ESP32 path but is not used by the printer-only runtime.
 
 ---
 
 ## 4. State Machine Contract
 
 `TransactionStateMachine` is the single source of truth for transaction state.
+
+Printer-only runtime note: the transaction state machine is not wired in the current service host.
 
 ### State Diagram
 
@@ -333,6 +323,8 @@ Proposal comment format:
 
 ## 6. Edge Cases & Hardware Constraints
 
+ESP32/coin/hopper constraints below are legacy context and not used in the current printer-only runtime.
+
 ### Coin Acceptor
 
 - Debounce is done by ESP32.
@@ -355,7 +347,7 @@ Proposal comment format:
 - Exact printer-name matching is required.
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)`).
 - Success requires both process success and spooler lifecycle verification.
-- Queue watcher print requests do not bypass transaction gates.
+- Queue watcher print requests go directly to `PrintService` (no transaction gate).
 
 ### State Machine
 

@@ -1,29 +1,24 @@
 # PrintBit Hardware Service
 
-A .NET 10 Windows Service Worker that bridges the ESP32 hardware layer (coin acceptor, hopper) with the print pipeline for the PrintBit kiosk system.
+A .NET 10 Windows Service Worker focused on the printer spooler and print queue for the PrintBit kiosk system. It also logs error messages received from the Node.js app over a named pipe.
 
 ---
 
 ## Architecture
 
 ```
-PrintBit.HardwareService   ← Worker Service host (entry point)
-├── PrintBit.Application   ← State machine, orchestration, event handlers
-├── PrintBit.Hardware      ← ESP32 device abstraction, message parsing
-├── PrintBit.Infrastructure← Serial comms, print dispatch, watchdog
-└── PrintBit.Shared        ← Enums, DTOs, configuration models
+PrintBit.HardwareService    ← Worker Service host (entry point)
+├── PrintBit.Application    ← State machine, orchestration, event handlers
+├── PrintBit.Hardware       ← ESP32 device abstraction, message parsing
+├── PrintBit.Infrastructure ← Serial comms, print dispatch, watchdog
+└── PrintBit.Shared         ← Enums, DTOs, configuration models
 ```
 
 ### Request Flow
 
 ```
-ESP32 (serial) → SerialConnection.DataReceived
-  → Esp32Device.ParseMessage()        # COIN:5, HOPPER:DONE, PING
-  → HardwareEventQueue.EnqueueAsync() # Channel<Esp32Message>, capacity 1024
-  → HardwareProcessingService         # BackgroundService consumer
-  → HardwareOrchestrator
-  → CoinInsertedHandler → TransactionStateMachine
-  → [if ReadyToPrint] StartPrintHandler → PrintService (SumatraPDF)
+Print queue → PrintQueueWatcherService → PrintService (SumatraPDF + spooler verify)
+Node.js errors → ErrorPipeHostedService (named pipe) → ILogger
 ```
 
 ---
@@ -31,15 +26,16 @@ ESP32 (serial) → SerialConnection.DataReceived
 ## Projects
 
 ### `PrintBit.HardwareService`
-Worker Service host. Registers all DI services and runs two `BackgroundService` workers.
+Worker Service host. Runs printer-only background services.
 
 | Service | Role |
 |---|---|
-| `Worker` | Connects ESP32 via serial, subscribes to `MessageReceived`, enqueues messages |
-| `HardwareProcessingService` | Drains `HardwareEventQueue`, dispatches to `HardwareOrchestrator` |
+| `PrintQueueWatcherService` | Watches the queue directory and submits print jobs |
+| `ErrorPipeHostedService` | Reads Node.js error messages from a named pipe and logs them |
+| `PrinterMonitorService` | Logs printer status and job state from Windows spooler |
 
 ### `PrintBit.Application`
-Business logic layer. No direct I/O dependencies.
+Business logic layer (present but not wired in the printer-only runtime). No direct I/O dependencies.
 
 | Class | Role |
 |---|---|
@@ -50,7 +46,7 @@ Business logic layer. No direct I/O dependencies.
 | `HardwareEventQueue` | Bounded `Channel<Esp32Message>` (1024 capacity, single-reader) |
 
 ### `PrintBit.Hardware`
-Hardware abstraction layer.
+Hardware abstraction layer (not wired in the printer-only runtime).
 
 | Class | Role |
 |---|---|
@@ -60,7 +56,7 @@ Hardware abstraction layer.
 | `Esp32Command` | Static command strings sent back to ESP32 (`HOPPER_DISPENSE`, `PONG`, etc.) |
 
 ### `PrintBit.Infrastructure`
-I/O services (serial port, print process, watchdog).
+I/O services (print process, printer monitoring, IPC helpers).
 
 | Class | Role |
 |---|---|
@@ -71,8 +67,8 @@ I/O services (serial port, print process, watchdog).
 ### `PrintBit.Shared`
 Cross-cutting types with no dependencies.
 
-- `TransactionState` enum — `Idle`, `WaitingForCoins`, `ReadyToPrint`, `Printing`, `DispensingChange`, `Completed`, `Error`
-- `HardwareSettings` — bound from `appsettings.json` via `IOptions<T>`
+- `HardwareSettings` — printer configuration bound from `appsettings.json`
+- `IpcSettings` — named pipe configuration for Node error messages
 
 ---
 
@@ -83,55 +79,24 @@ Cross-cutting types with no dependencies.
 ```json
 {
   "HardwareSettings": {
-    "Esp32Port": "COM3",
-    "Esp32BaudRate": 115200,
-    "WatchdogIntervalSeconds": 5
+    "PrintTimeoutSeconds": 120,
+    "PrinterName": "EPSON L5290 Series",
+    "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue"
+  },
+  "IpcSettings": {
+    "PipeName": "printbit-node-errors",
+    "MaxMessageBytes": 8192
   }
 }
 ```
 
 | Key | Default | Description |
 |---|---|---|
-| `Esp32Port` | `COM3` | Serial port the ESP32 is connected to |
-| `Esp32BaudRate` | `115200` | Must match ESP32 firmware baud rate |
-| `WatchdogIntervalSeconds` | `5` | Heartbeat poll interval (seconds) |
-
----
-
-## ESP32 Serial Protocol
-
-### Inbound (ESP32 → Service)
-
-| Message | Parsed As | Notes |
-|---|---|---|
-| `COIN:<int>` | `CoinInserted`, `Value = <int>` | Coin denomination in centavos/units |
-| `HOPPER:DONE` | `HopperCompleted` | Change dispense complete |
-| `PING` | `Heartbeat` | Keepalive from ESP32 |
-| _(anything else)_ | `Unknown` | Logged, not processed |
-
-### Outbound (Service → ESP32)
-
-| Constant | Value | Trigger |
-|---|---|---|
-| `Esp32Command.Ping` | `PONG` | Heartbeat response |
-| `Esp32Command.HopperDispense` | `HOPPER_DISPENSE` | Trigger change dispense |
-| `Esp32Command.PrinterStart` | `PRINTER_START` | Notify print started |
-| `Esp32Command.PrinterComplete` | `PRINTER_COMPLETE` | Notify print done |
-
----
-
-## Transaction State Machine
-
-```
-Idle
- └─[InsertCoin]──► WaitingForCoins
-                      └─[balance >= ₱5]──► ReadyToPrint
-                                              └─[StartPrinting]──► Printing
-                                                                      └─[Complete]──► Completed
-                                                                      └─[Fail/Reset]──► Idle
-```
-
-`Reset()` from any state returns to `Idle` with `CurrentBalance = 0`.
+| `PrintTimeoutSeconds` | `120` | Print timeout in seconds |
+| `PrinterName` | `EPSON L5290 Series` | Windows printer name |
+| `PrintQueueDirectory` | `C:\\Users\\printbit\\printbit-worker\\queue` | Directory watched for PDFs |
+| `IpcSettings.PipeName` | `printbit-node-errors` | Named pipe for Node error messages |
+| `IpcSettings.MaxMessageBytes` | `8192` | Max bytes per error line |
 
 ---
 
@@ -158,9 +123,6 @@ SumatraPDF.exe -print-to "<PrinterName>" -print-settings "<copies>" "<filePath>"
 # Development
 cd src/PrintBit.HardwareService
 dotnet run
-
-# Override port for dev (no physical ESP32)
-# Edit appsettings.Development.json → HardwareSettings.Esp32Port
 ```
 
 ### Install as Windows Service
@@ -179,15 +141,14 @@ The project references `Microsoft.Extensions.Hosting.WindowsServices` — the ho
 
 | Area | Status |
 |---|---|
-| `HopperDevice` / `IHopper` | Stub — dispense logic not implemented |
+| `HopperDevice` / `IHopper` | Stub — dispense logic not implemented (not wired in printer-only runtime) |
 | `EpsonPrinterDevice` / `IPrinterDevice` | Stub — direct WIA/ESC-P integration not implemented |
-| `CoinAcceptorDevice` / `ICoinAcceptor` | Stub — direct Arduino path not implemented |
-| `HardwareStateMachine` / `PrintJobStateMachine` | Stubs — merged into `TransactionStateMachine` for now |
+| `CoinAcceptorDevice` / `ICoinAcceptor` | Stub — direct Arduino path not implemented (not wired) |
+| `HardwareStateMachine` / `PrintJobStateMachine` | Stubs — merged into `TransactionStateMachine` for now (not wired) |
 | `TransactionService` | Stub — persistence not wired |
-| `NamedPipeServer` / `SocketServer` / `MessageDispatcher` | Stubs — IPC to Node.js kiosk app not implemented |
+| `NamedPipeServer` / `SocketServer` / `MessageDispatcher` | Stubs — legacy IPC server unused; error pipe uses `ErrorPipeHostedService` |
 | Shared DTOs (`TransactionDto`, `HardwareStatusDto`, etc.) | Empty — not yet used |
 | `HopperDispenseHandler` / `PrintCompletedHandler` | Stubs — post-print change flow not wired |
-| File path for print job | Hardcoded to `C:\PrintBit\sample.pdf` in `HardwareOrchestrator` |
 
 ---
 
@@ -221,15 +182,14 @@ src/
 │       ├── Hopper/          # (stub)
 │       └── Printer/         # (stub)
 ├── PrintBit.HardwareService/
-│   ├── Services/            # HardwareProcessingService
-│   ├── Worker.cs            # ESP32 serial → queue
+│   ├── Services/            # PrintQueueWatcherService, ErrorPipeHostedService
 │   └── Program.cs           # DI registration
 ├── PrintBit.Infrastructure/
 │   └── Services/
 │       ├── PrintService/    # IPrintService, PrintService (SumatraPDF)
-│       ├── SerialService/   # ISerialConnection, SerialConnection
-│       ├── WatchdogService/ # WatchdogService
-│       ├── IPC/             # (stubs: NamedPipe, Socket, Dispatcher)
+│       ├── SerialService/   # ISerialConnection, SerialConnection (unused)
+│       ├── WatchdogService/ # WatchdogService (unused)
+│       ├── IPC/             # Node error parsing helpers + legacy stubs
 │       └── TransactionService/ # (stub)
 └── PrintBit.Shared/
     ├── Configurations/      # HardwareSettings

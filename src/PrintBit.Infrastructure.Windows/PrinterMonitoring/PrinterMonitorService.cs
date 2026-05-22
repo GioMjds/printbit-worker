@@ -2,6 +2,8 @@
 using System.Runtime.Versioning;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using PrintBit.Shared.Configurations;
 
 namespace PrintBit.Infrastructure.Windows.PrinterMonitoring;
 
@@ -10,12 +12,14 @@ public class PrinterMonitorService : BackgroundService
 {
     private readonly ILogger<PrinterMonitorService> _logger;
 
-    private const string PrinterName = "EPSON L5290 Series";
+    private readonly HardwareSettings _settings;
 
     public PrinterMonitorService(
-        ILogger<PrinterMonitorService> logger)
+        ILogger<PrinterMonitorService> logger,
+        IOptions<HardwareSettings> options)
     {
         _logger = logger;
+        _settings = options.Value;
     }
 
     protected override async Task ExecuteAsync(
@@ -23,7 +27,7 @@ public class PrinterMonitorService : BackgroundService
     {
         _logger.LogInformation(
             "Printer monitor started for {printer}",
-            PrinterName);
+            _settings.PrinterName);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -48,7 +52,7 @@ public class PrinterMonitorService : BackgroundService
     private void MonitorPrinterStatus()
     {
         using var searcher = new ManagementObjectSearcher(
-            $"SELECT * FROM Win32_Printer WHERE Name = '{PrinterName}'");
+            $"SELECT * FROM Win32_Printer WHERE Name = '{_settings.PrinterName}'");
 
         foreach (ManagementObject printer in searcher.Get())
         {
