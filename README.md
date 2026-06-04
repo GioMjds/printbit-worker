@@ -68,7 +68,7 @@ I/O services (print process, printer monitoring, IPC helpers).
 Cross-cutting types with no dependencies.
 
 - `HardwareSettings` — printer configuration bound from `appsettings.json`
-- `IpcSettings` — named pipe configuration for Node error messages
+- `IpcSettings` — named pipe configuration for Node error + return events
 
 ---
 
@@ -85,7 +85,8 @@ Cross-cutting types with no dependencies.
   },
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
-    "MaxMessageBytes": 8192
+    "MaxMessageBytes": 8192,
+    "WorkerReturnPipeName": "printbit-worker-events"
   }
 }
 ```
@@ -97,6 +98,7 @@ Cross-cutting types with no dependencies.
 | `PrintQueueDirectory` | `C:\\Users\\printbit\\printbit-worker\\queue` | Directory watched for PDFs |
 | `IpcSettings.PipeName` | `printbit-node-errors` | Named pipe for Node error messages |
 | `IpcSettings.MaxMessageBytes` | `8192` | Max bytes per error line |
+| `IpcSettings.WorkerReturnPipeName` | `printbit-worker-events` | Named pipe for worker return events |
 
 ---
 

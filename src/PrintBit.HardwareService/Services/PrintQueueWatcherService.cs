@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 
@@ -12,15 +13,19 @@ public class PrintQueueWatcherService : BackgroundService
 
     private readonly IPrintService _printService;
 
+    private readonly WorkerEventPipeClient _eventPipe;
+
     private readonly HardwareSettings _settings;
 
     public PrintQueueWatcherService(
         ILogger<PrintQueueWatcherService> logger,
         IPrintService printService,
+        WorkerEventPipeClient eventPipe,
         IOptions<HardwareSettings> options)
     {
         _logger = logger;
         _printService = printService;
+        _eventPipe = eventPipe;
         _settings = options.Value;
     }
 
@@ -63,6 +68,20 @@ public class PrintQueueWatcherService : BackgroundService
                             "Detected print file: {file}",
                             file);
 
+                        var fileName = Path.GetFileName(file);
+                        var correlation = TryParseCorrelation(fileName);
+
+                        await _eventPipe.SendAsync(
+                            new WorkerPrintEvent
+                            {
+                                Type = WorkerPrintEventType.PrintStarted,
+                                TransactionId = correlation.TransactionId,
+                                SpoolerCorrelationKey = correlation.SpoolerCorrelationKey,
+                                FileName = fileName,
+                                PrinterName = _settings.PrinterName
+                            },
+                            stoppingToken);
+
                         var result = await _printService.PrintAsync(
                             new PrintJobRequest
                             {
@@ -85,6 +104,25 @@ public class PrintQueueWatcherService : BackgroundService
                                 "Queue print succeeded: {file}",
                                 file);
                         }
+
+                        await _eventPipe.SendAsync(
+                            new WorkerPrintEvent
+                            {
+                                Type = result.Success
+                                    ? WorkerPrintEventType.PrintSucceeded
+                                    : WorkerPrintEventType.PrintFailed,
+                                TransactionId = correlation.TransactionId,
+                                SpoolerCorrelationKey = correlation.SpoolerCorrelationKey,
+                                FileName = fileName,
+                                PrinterName = _settings.PrinterName,
+                                FailureStage = result.Success
+                                    ? null
+                                    : result.FailureStage.ToString(),
+                                Message = result.Success
+                                    ? "Print completed"
+                                    : result.Message
+                            },
+                            stoppingToken);
 
                         var archivePath =
                             Path.Combine(
@@ -133,5 +171,19 @@ public class PrintQueueWatcherService : BackgroundService
 
             await Task.Delay(2000, stoppingToken);
         }
+    }
+
+    public static (string? TransactionId, string? SpoolerCorrelationKey) TryParseCorrelation(
+        string fileName)
+    {
+        var baseName = Path.GetFileNameWithoutExtension(fileName);
+        var parts = baseName.Split('_', 3, StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length < 2)
+        {
+            return (null, null);
+        }
+
+        return (parts[0], parts[1]);
     }
 }

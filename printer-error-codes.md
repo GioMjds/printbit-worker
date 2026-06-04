@@ -37,9 +37,39 @@ These logs include WMI fields like `PrinterStatus` and `DetectedErrorState`. If 
   "message": "Printer spooler error: access denied",
   "code": "SPOOLER_ACCESS",
   "source": "kiosk-ui",
+  "transactionId": "PB-20260525-0001",
+  "spoolerCorrelationKey": "79f1c2ae-6a1a-46a8-b43f-0a9c0d1ea1d2",
   "stack": "Error: ...",
   "timestampUtc": "2026-05-22T03:21:58Z"
 }
 ```
 
-The service logs these entries at **Error** level with fields: `Source`, `Code`, `Message`, `TimestampUtc`, and `Stack`.
+The service logs these entries at **Error** level with fields: `Source`, `Code`, `Message`, `TransactionId`, `SpoolerCorrelationKey`, `TimestampUtc`, and `Stack`.
+
+## 4. Service -> Node return pipe (named pipe)
+
+The C# worker sends **one JSON object per line** to the Node return pipe (`IpcSettings.WorkerReturnPipeName`).
+
+```json
+{
+  "type": "PrintFailed",
+  "transactionId": "PB-20260525-0001",
+  "spoolerCorrelationKey": "79f1c2ae-6a1a-46a8-b43f-0a9c0d1ea1d2",
+  "fileName": "PB-20260525-0001_79f1c2ae_1700000000000.pdf",
+  "printerName": "EPSON L5290 Series",
+  "failureStage": "SpoolerVerification",
+  "message": "No spooler job observed for document '...'",
+  "timestampUtc": "2026-05-25T01:45:00Z"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `type` | Yes | `PrintStarted`, `PrintSucceeded`, or `PrintFailed` |
+| `timestampUtc` | Yes | ISO-8601 UTC timestamp |
+| `transactionId` | No | Parsed from the queue file name |
+| `spoolerCorrelationKey` | No | Parsed from the queue file name |
+| `fileName` | No | Queue file name (PDF) |
+| `printerName` | No | `HardwareSettings.PrinterName` |
+| `failureStage` | No | `PrintFailureStage` string when failed |
+| `message` | No | Success summary or failure detail |

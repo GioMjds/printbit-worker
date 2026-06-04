@@ -1,5 +1,8 @@
-﻿using System.Management;
+﻿using System.IO.Pipes;
+using System.Management;
 using System.Runtime.Versioning;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -11,71 +14,106 @@ namespace PrintBit.Infrastructure.Windows.PrinterMonitoring;
 public class PrinterMonitorService : BackgroundService
 {
     private readonly ILogger<PrinterMonitorService> _logger;
+    private readonly HardwareSettings _hardwareSettings;
+    private readonly IpcSettings _ipcSettings;
 
-    private readonly HardwareSettings _settings;
+    // Track last known state to avoid flooding the pipe with repeat events
+    private bool? _lastOfflineState = null;
+    private string? _lastErrorState = null;
 
     public PrinterMonitorService(
         ILogger<PrinterMonitorService> logger,
-        IOptions<HardwareSettings> options)
+        IOptions<HardwareSettings> hardwareOptions,
+        IOptions<IpcSettings> ipcOptions)
     {
         _logger = logger;
-        _settings = options.Value;
+        _hardwareSettings = hardwareOptions.Value;
+        _ipcSettings = ipcOptions.Value;
     }
 
-    protected override async Task ExecuteAsync(
-        CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation(
             "Printer monitor started for {printer}",
-            _settings.PrinterName);
+            _hardwareSettings.PrinterName);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                MonitorPrinterStatus();
+                await MonitorPrinterStatusAsync(stoppingToken);
                 MonitorPrintJobs();
             }
             catch (Exception ex)
             {
-                _logger.LogError(
-                    ex,
-                    "Printer monitoring failed");
+                _logger.LogError(ex, "Printer monitoring failed");
             }
 
-            await Task.Delay(
-                2000,
-                stoppingToken);
+            await Task.Delay(2000, stoppingToken);
         }
     }
 
-    private void MonitorPrinterStatus()
+    private async Task MonitorPrinterStatusAsync(CancellationToken stoppingToken)
     {
         using var searcher = new ManagementObjectSearcher(
-            $"SELECT * FROM Win32_Printer WHERE Name = '{_settings.PrinterName}'");
+            $"SELECT * FROM Win32_Printer WHERE Name = '{_hardwareSettings.PrinterName}'");
 
         foreach (ManagementObject printer in searcher.Get())
         {
-            var isOffline = printer["WorkOffline"];
+            var isOffline = printer["WorkOffline"] is true;
             var status = printer["PrinterStatus"];
-            var errorState = printer["DetectedErrorState"];
+            var errorState = printer["DetectedErrorState"]?.ToString() ?? "0";
 
             _logger.LogInformation(
                 "Printer status | Offline={offline} Status={status} Error={error}",
-                isOffline,
-                status,
-                errorState);
+                isOffline, status, errorState);
 
-            if (isOffline is true)
+            // ── Offline state change detection ──────────────────────────────
+            if (_lastOfflineState != isOffline)
             {
-                _logger.LogWarning("Printer is OFFLINE");
+                _lastOfflineState = isOffline;
+
+                if (isOffline)
+                {
+                    _logger.LogWarning("Printer is OFFLINE — notifying Node.js");
+                    await SendToReturnPipeAsync(new
+                    {
+                        type = "PrinterOffline",
+                        printerName = _hardwareSettings.PrinterName,
+                        message = "Printer is offline or unreachable. Check USB/network connection.",
+                        timestampUtc = DateTime.UtcNow.ToString("o"),
+                    }, stoppingToken);
+                }
+                else
+                {
+                    _logger.LogInformation("Printer is back ONLINE — notifying Node.js");
+                    await SendToReturnPipeAsync(new
+                    {
+                        type = "PrinterOnline",
+                        printerName = _hardwareSettings.PrinterName,
+                        message = "Printer is back online.",
+                        timestampUtc = DateTime.UtcNow.ToString("o"),
+                    }, stoppingToken);
+                }
             }
 
-            if (errorState != null && errorState.ToString() != "0")
+            // ── Error state change detection ─────────────────────────────────
+            if (_lastErrorState != errorState)
             {
-                _logger.LogWarning(
-                    "Printer error detected: {error}",
-                    errorState);
+                _lastErrorState = errorState;
+
+                if (errorState != "0")
+                {
+                    _logger.LogWarning("Printer error detected: {error}", errorState);
+                    await SendToReturnPipeAsync(new
+                    {
+                        type = "PrinterOffline",
+                        printerName = _hardwareSettings.PrinterName,
+                        failureStage = "hardware_error",
+                        message = $"Printer hardware error detected (code {errorState}). Check paper, ink, or connection.",
+                        timestampUtc = DateTime.UtcNow.ToString("o"),
+                    }, stoppingToken);
+                }
             }
         }
     }
@@ -87,15 +125,56 @@ public class PrinterMonitorService : BackgroundService
 
         foreach (ManagementObject job in searcher.Get())
         {
-            var name = job["Name"];
-            var status = job["JobStatus"];
-            var document = job["Document"];
-
             _logger.LogInformation(
                 "Print job | Name={name} Document={doc} Status={status}",
-                name,
-                document,
-                status);
+                job["Name"], job["Document"], job["JobStatus"]);
+        }
+    }
+
+    /// <summary>
+    /// Writes a newline-delimited JSON event to the worker return pipe.
+    /// Node.js reads this in startWorkerReturnPipeServer() in worker-return-pipe.ts.
+    /// </summary>
+    private async Task SendToReturnPipeAsync(
+        object payload,
+        CancellationToken stoppingToken)
+    {
+        var pipeName = _ipcSettings.WorkerReturnPipeName; // "printbit-worker-events"
+
+        try
+        {
+            using var pipeClient = new NamedPipeClientStream(
+                ".",
+                pipeName,
+                PipeDirection.Out,
+                PipeOptions.Asynchronous);
+
+            // 3 second connect timeout — Node may not be ready yet
+            await pipeClient.ConnectAsync(3_000, stoppingToken);
+
+            var json = JsonSerializer.Serialize(payload);
+            var bytes = Encoding.UTF8.GetBytes(json + "\n"); // newline-delimited
+
+            await pipeClient.WriteAsync(bytes, stoppingToken);
+            await pipeClient.FlushAsync(stoppingToken);
+
+            _logger.LogInformation(
+                "[PIPE → Node] Sent {type} to {pipe}",
+                payload.GetType().GetProperty("type")?.GetValue(payload),
+                pipeName);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning(
+                "[PIPE → Node] Connect timeout on {pipe} — Node.js may not be running",
+                pipeName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "[PIPE → Node] Failed to send event to {pipe}",
+                pipeName);
         }
     }
 }

@@ -11,4 +11,8 @@ public sealed record NodeErrorMessage
     public string? Stack { get; init; }
 
     public DateTime? TimestampUtc { get; init; }
+
+    public string? TransactionId { get; init; }
+
+    public string? SpoolerCorrelationKey { get; init; }
 }

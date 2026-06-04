@@ -17,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\PrintBit.HardwareService\PrintBit.HardwareService.csproj" />
     <ProjectReference Include="..\..\src\PrintBit.Application\PrintBit.Application.csproj" />
     <ProjectReference Include="..\..\src\PrintBit.Infrastructure\PrintBit.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\PrintBit.Shared\PrintBit.Shared.csproj" />

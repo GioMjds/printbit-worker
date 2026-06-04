@@ -1,4 +1,5 @@
 using PrintBit.HardwareService.Services;
+using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 using PrintBit.Infrastructure.Windows.PrinterMonitoring;
@@ -18,6 +19,8 @@ builder.Services.AddHostedService<PrinterMonitorService>();
 builder.Services.AddSingleton<IPrintService, PrintService>();
 
 builder.Services.AddSingleton<IPrintRecoveryService, PrintRecoveryService>();
+
+builder.Services.AddSingleton<WorkerEventPipeClient>();
 
 var host = builder.Build();
 

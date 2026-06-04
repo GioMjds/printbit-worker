@@ -83,10 +83,12 @@ public sealed class ErrorPipeHostedService : BackgroundService
                     }
 
                     _logger.LogError(
-                        "Node error | Source={source} Code={code} Message={message} TimestampUtc={timestampUtc} Stack={stack}",
+                        "Node error | Source={source} Code={code} Message={message} TransactionId={transactionId} SpoolerCorrelationKey={spoolerKey} TimestampUtc={timestampUtc} Stack={stack}",
                         message.Source ?? "unknown",
                         message.Code ?? "unknown",
                         message.Message,
+                        message.TransactionId,
+                        message.SpoolerCorrelationKey,
                         message.TimestampUtc,
                         message.Stack);
                 }

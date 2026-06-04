@@ -32,6 +32,7 @@
 - A **printer bridge**: watches a print queue and dispatches print jobs through the Windows spooler.
 - A **Windows Service**: startup/shutdown sequencing matters.
 - An **IPC sink**: logs error messages sent from the Node.js app over a named pipe.
+- An **IPC source**: emits print lifecycle events to the Node.js app over a named pipe.
 
 ### Why normal assumptions break here
 
@@ -131,8 +132,25 @@ Critical constraints:
 | `message` | Yes | Error message to log |
 | `code` | No | Optional error code |
 | `source` | No | Source identifier (e.g., kiosk UI) |
+| `transactionId` | No | Optional transaction identifier for correlation |
+| `spoolerCorrelationKey` | No | Optional spooler correlation key |
 | `stack` | No | Optional stack trace |
 | `timestampUtc` | No | ISO-8601 timestamp |
+
+### Named Pipe (Service -> Node Return Pipe)
+
+`WorkerEventPipeClient` connects to the Node return pipe and sends **line-delimited JSON** print events.
+
+| Field | Required | Notes |
+|---|---|---|
+| `type` | Yes | `PrintStarted`, `PrintSucceeded`, or `PrintFailed` |
+| `transactionId` | No | Parsed from queue file name |
+| `spoolerCorrelationKey` | No | Parsed from queue file name |
+| `fileName` | No | Queue file name |
+| `printerName` | No | Printer display name |
+| `failureStage` | No | `PrintFailureStage` string when failed |
+| `message` | No | Success summary or failure detail |
+| `timestampUtc` | Yes | ISO-8601 timestamp |
 
 ---
 
@@ -155,10 +173,11 @@ Dependency direction:
 
 | Class | Project | Responsibility |
 |---|---|---|
-| `PrintQueueWatcherService` | HardwareService | Watches queue directory and invokes `IPrintService` directly |
+| `PrintQueueWatcherService` | HardwareService | Watches queue directory, invokes `IPrintService`, and emits worker events |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
 | `PrinterMonitorService` | Infrastructure.Windows | Logs printer status and job info from Windows spooler |
 | `PrintService` | Infrastructure | Sumatra process + spooler verification + print lock |
+| `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 
 Legacy ESP32/orchestrator classes remain in the codebase but are not wired in the printer-only runtime.
 
@@ -178,6 +197,7 @@ builder.Services.AddHostedService<PrinterMonitorService>();
 
 builder.Services.AddSingleton<IPrintService, PrintService>();
 builder.Services.AddSingleton<IPrintRecoveryService, PrintRecoveryService>();
+builder.Services.AddSingleton<WorkerEventPipeClient>();
 ```
 
 ### Configuration
@@ -196,7 +216,8 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
   },
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
-    "MaxMessageBytes": 8192
+    "MaxMessageBytes": 8192,
+    "WorkerReturnPipeName": "printbit-worker-events"
   }
 }
 ```
