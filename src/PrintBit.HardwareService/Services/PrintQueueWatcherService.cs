@@ -7,6 +7,11 @@ namespace PrintBit.HardwareService.Services;
 
 public class PrintQueueWatcherService : BackgroundService
 {
+    // Mirrors PrinterMonitorService: the default 500ms connect
+    // timeout is too short when Node.js is still starting alongside
+    // the worker, so the first event of a session would be lost.
+    private const int NodeConnectTimeoutMs = 3_000;
+
     private readonly HashSet<string> _processingFiles = [];
 
     private readonly ILogger<PrintQueueWatcherService> _logger;
@@ -80,7 +85,8 @@ public class PrintQueueWatcherService : BackgroundService
                                 FileName = fileName,
                                 PrinterName = _settings.PrinterName
                             },
-                            stoppingToken);
+                            stoppingToken,
+                            connectTimeoutMilliseconds: NodeConnectTimeoutMs);
 
                         var result = await _printService.PrintAsync(
                             new PrintJobRequest
@@ -122,7 +128,8 @@ public class PrintQueueWatcherService : BackgroundService
                                     ? "Print completed"
                                     : result.Message
                             },
-                            stoppingToken);
+                            stoppingToken,
+                            connectTimeoutMilliseconds: NodeConnectTimeoutMs);
 
                         var archivePath =
                             Path.Combine(

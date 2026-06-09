@@ -143,14 +143,44 @@ Critical constraints:
 
 | Field | Required | Notes |
 |---|---|---|
-| `type` | Yes | `PrintStarted`, `PrintSucceeded`, or `PrintFailed` |
+| `type` | Yes | `PrintStarted`, `PrintSucceeded`, `PrintFailed`, `PrinterOffline`, `PrinterOnline`, or `PrinterError` |
 | `transactionId` | No | Parsed from queue file name |
 | `spoolerCorrelationKey` | No | Parsed from queue file name |
 | `fileName` | No | Queue file name |
 | `printerName` | No | Printer display name |
-| `failureStage` | No | `PrintFailureStage` string when failed |
+| `failureStage` | No | `PrintFailureStage` string when failed; `hardware_error` for `PrinterError` |
 | `message` | No | Success summary or failure detail |
 | `timestampUtc` | Yes | ISO-8601 timestamp |
+
+Printer monitor events use the same line-delimited JSON pipe. `PrinterError`
+carries `failureStage = "hardware_error"` and a human-readable `message`
+describing the detected error code. `PrinterOffline` / `PrinterOnline` are
+emitted on the WMI `WorkOffline` state change.
+
+### Cross-Windows-Identity DACL
+
+The kiosk runs the C# worker as `desktop-jhtg0bm\printbit` and the Node
+service from an Administrator PowerShell as `desktop-jhtg0bm\admin`. The
+default DACL of a named pipe excludes other interactive users, so a
+client running as `printbit` would get `UnauthorizedAccessException`
+when connecting to a pipe created by `admin`.
+
+- **Node return pipe** (`printbit-worker-events`): the server binds with
+  `readableAll: true, writableAll: true` (libuv `uv_pipe_chmod`), which
+  sets a permissive DACL. This is the only DACL knob Node's `net` API
+  exposes; see
+  `src/services/worker-return-pipe.ts` `server.listen({ ... })`.
+- **C# error pipe** (`printbit-node-errors`): the C# `printbit` user is
+  not in the `BUILTIN\Administrators` group, but the Node `admin` user
+  is. The default DACL on a `printbit`-created pipe already grants
+  `Administrators` access, so the `admin` client can connect without
+  any code change. `.NET 10`'s `NamedPipeServerStream` no longer
+  exposes a public `PipeSecurity` constructor, so a more restrictive
+  C# deployment would need P/Invoke to `SetSecurityInfo` on
+  `SafePipeHandle`.
+
+If the kiosk is re-deployed with the two processes under the same
+identity, both fixes become inert (the default DACL is sufficient).
 
 ---
 
@@ -398,6 +428,7 @@ Before closing any task, diff what changed against this file and update stale se
 | `appsettings` keys changed | Section 3 configuration |
 | New tests documenting behavior | Section 5 Agent MAY |
 | Public interface in Section 3 changed | Section 3 key classes |
+| Named-pipe DACL/ACL behaviour changed | Section 2 cross-Windows-identity DACL |
 
 ### Update Format
 
