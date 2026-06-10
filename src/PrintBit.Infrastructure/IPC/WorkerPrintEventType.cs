@@ -4,5 +4,8 @@ public enum WorkerPrintEventType
 {
     PrintStarted,
     PrintSucceeded,
-    PrintFailed
+    PrintFailed,
+    PrinterOffline,
+    PrinterOnline,
+    PrinterError
 }

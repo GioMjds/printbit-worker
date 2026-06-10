@@ -31,73 +31,83 @@ public sealed class ErrorPipeHostedService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await using var server = new NamedPipeServerStream(
-                _settings.PipeName,
-                PipeDirection.In,
-                maxNumberOfServerInstances: 1,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous);
-
             try
             {
-                await server.WaitForConnectionAsync(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
+                await using var server = new NamedPipeServerStream(
+                    _settings.PipeName,
+                    PipeDirection.In,
+                    maxNumberOfServerInstances: 1,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous);
 
-            _logger.LogInformation("Node error pipe client connected");
-
-            try
-            {
-                using var reader = new StreamReader(
-                    server,
-                    Encoding.UTF8,
-                    detectEncodingFromByteOrderMarks: true,
-                    bufferSize: 1024,
-                    leaveOpen: true);
-
-                while (!stoppingToken.IsCancellationRequested && server.IsConnected)
+                try
                 {
-                    var line = await reader.ReadLineAsync(stoppingToken);
+                    await server.WaitForConnectionAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
 
-                    if (line is null)
+                _logger.LogInformation("Node error pipe client connected");
+
+                try
+                {
+                    using var reader = new StreamReader(
+                        server,
+                        Encoding.UTF8,
+                        detectEncodingFromByteOrderMarks: true,
+                        bufferSize: 1024,
+                        leaveOpen: true);
+
+                    while (!stoppingToken.IsCancellationRequested && server.IsConnected)
                     {
-                        break;
-                    }
+                        var line = await reader.ReadLineAsync(stoppingToken);
 
-                    if (string.IsNullOrWhiteSpace(line))
-                    {
-                        continue;
-                    }
+                        if (line is null)
+                        {
+                            break;
+                        }
 
-                    if (!NodeErrorMessageParser.TryParse(
-                            line,
-                            _settings.MaxMessageBytes,
-                            out var message,
-                            out var errorCode))
-                    {
-                        LogParseWarning(errorCode, line, _settings.MaxMessageBytes);
-                        continue;
-                    }
+                        if (string.IsNullOrWhiteSpace(line))
+                        {
+                            continue;
+                        }
 
-                    _logger.LogError(
-                        "Node error | Source={source} Code={code} Message={message} TransactionId={transactionId} SpoolerCorrelationKey={spoolerKey} TimestampUtc={timestampUtc} Stack={stack}",
-                        message.Source ?? "unknown",
-                        message.Code ?? "unknown",
-                        message.Message,
-                        message.TransactionId,
-                        message.SpoolerCorrelationKey,
-                        message.TimestampUtc,
-                        message.Stack);
+                        if (!NodeErrorMessageParser.TryParse(
+                                line,
+                                _settings.MaxMessageBytes,
+                                out var message,
+                                out var errorCode))
+                        {
+                            LogParseWarning(errorCode, line, _settings.MaxMessageBytes);
+                            continue;
+                        }
+
+                        _logger.LogError(
+                            "Node error | Source={source} Code={code} Message={message} TransactionId={transactionId} SpoolerCorrelationKey={spoolerKey} TimestampUtc={timestampUtc} Stack={stack}",
+                            message.Source ?? "unknown",
+                            message.Code ?? "unknown",
+                            message.Message,
+                            message.TransactionId,
+                            message.SpoolerCorrelationKey,
+                            message.TimestampUtc,
+                            message.Stack);
+                    }
+                }
+                catch (IOException ex)
+                {
+                    _logger.LogInformation(
+                        ex,
+                        "Node error pipe client disconnected");
                 }
             }
-            catch (IOException ex)
+            catch (UnauthorizedAccessException ex)
             {
-                _logger.LogInformation(
-                    ex,
-                    "Node error pipe client disconnected");
+                _logger.LogWarning(
+                    "Node error pipe at {pipe} is already in use. Retrying in 5 seconds...",
+                    _settings.PipeName);
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
     }

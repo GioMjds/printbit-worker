@@ -10,7 +10,7 @@ namespace PrintBit.Infrastructure.IPC;
 
 public sealed class WorkerEventPipeClient
 {
-    private const int ConnectTimeoutMilliseconds = 500;
+    private const int DefaultConnectTimeoutMilliseconds = 500;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -29,9 +29,16 @@ public sealed class WorkerEventPipeClient
         _settings = options.Value;
     }
 
-    public async Task SendAsync(
+    /// <summary>
+    /// Sends a newline-delimited JSON event to the worker return pipe.
+    /// Returns true when the payload was written and flushed; false when
+    /// the listener was unavailable (timeout, access denied, IO error).
+    /// Callers can keep the event and retry on a later call.
+    /// </summary>
+    public async Task<bool> SendAsync(
         WorkerPrintEvent evt,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int connectTimeoutMilliseconds = DefaultConnectTimeoutMilliseconds)
     {
         if (evt is null)
         {
@@ -46,25 +53,44 @@ public sealed class WorkerEventPipeClient
 
         try
         {
-            await client.ConnectAsync(ConnectTimeoutMilliseconds, cancellationToken);
+            await client.ConnectAsync(connectTimeoutMilliseconds, cancellationToken);
 
             var payload = JsonSerializer.Serialize(evt, JsonOptions) + "\n";
             var bytes = Encoding.UTF8.GetBytes(payload);
 
             await client.WriteAsync(bytes, cancellationToken);
             await client.FlushAsync(cancellationToken);
+
+            _logger.LogInformation(
+                "[PIPE → Node] Sent {type} to {pipe}",
+                evt.Type,
+                _settings.WorkerReturnPipeName);
+
+            return true;
         }
         catch (TimeoutException ex)
         {
             _logger.LogWarning(
                 ex,
-                "Worker return pipe connection timed out");
+                "[PIPE → Node] Connect timeout on {pipe} — Node.js may not be running",
+                _settings.WorkerReturnPipeName);
+            return false;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "[PIPE → Node] Access denied connecting to {pipe}; ensure Node.js and the worker run under compatible Windows identities",
+                _settings.WorkerReturnPipeName);
+            return false;
         }
         catch (IOException ex)
         {
             _logger.LogWarning(
                 ex,
-                "Worker return pipe connection failed");
+                "[PIPE → Node] Failed to send event to {pipe}",
+                _settings.WorkerReturnPipeName);
+            return false;
         }
     }
 }
