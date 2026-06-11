@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
@@ -54,26 +55,34 @@ public class PrintQueueWatcherService : BackgroundService
         {
             try
             {
-                var pdfFiles = Directory.GetFiles(queueDirectory, "*.pdf");
+                var jsonFiles = Directory.GetFiles(queueDirectory, "*.json");
 
-                foreach (var file in pdfFiles)
+                foreach (var jsonFile in jsonFiles)
                 {
-                    if (_processingFiles.Contains(file))
+                    if (_processingFiles.Contains(jsonFile))
                     {
                         continue;
                     }
 
-                    _processingFiles.Add(file);
+                    _processingFiles.Add(jsonFile);
 
                     try
                     {
                         await Task.Delay(1000, stoppingToken);
 
-                        _logger.LogInformation(
-                            "Detected print file: {file}",
-                            file);
+                        var pdfFile = Path.ChangeExtension(jsonFile, ".pdf");
+                        if (!File.Exists(pdfFile))
+                        {
+                            _logger.LogWarning("Found JSON sidecar {jsonFile} but missing PDF file. Skipping.", jsonFile);
+                            continue;
+                        }
 
-                        var fileName = Path.GetFileName(file);
+                        _logger.LogInformation("Detected print job: {pdfFile} with settings {jsonFile}", pdfFile, jsonFile);
+
+                        var jsonContent = await File.ReadAllTextAsync(jsonFile, stoppingToken);
+                        var settings = JsonSerializer.Deserialize<PrintJobSettings>(jsonContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new PrintJobSettings();
+
+                        var fileName = Path.GetFileName(pdfFile);
                         var correlation = TryParseCorrelation(fileName);
 
                         await _eventPipe.SendAsync(
@@ -91,8 +100,9 @@ public class PrintQueueWatcherService : BackgroundService
                         var result = await _printService.PrintAsync(
                             new PrintJobRequest
                             {
-                                FilePath = file,
-                                PrinterName = _settings.PrinterName
+                                FilePath = pdfFile,
+                                PrinterName = _settings.PrinterName,
+                                Settings = settings
                             },
                             stoppingToken);
 
@@ -102,13 +112,11 @@ public class PrintQueueWatcherService : BackgroundService
                                 "Queue print failed | Stage={stage} | Message={message} | File={file}",
                                 result.FailureStage,
                                 result.Message,
-                                file);
+                                pdfFile);
                         }
                         else
                         {
-                            _logger.LogInformation(
-                                "Queue print succeeded: {file}",
-                                file);
+                            _logger.LogInformation("Queue print succeeded: {file}", pdfFile);
                         }
 
                         await _eventPipe.SendAsync(
@@ -121,32 +129,19 @@ public class PrintQueueWatcherService : BackgroundService
                                 SpoolerCorrelationKey = correlation.SpoolerCorrelationKey,
                                 FileName = fileName,
                                 PrinterName = _settings.PrinterName,
-                                FailureStage = result.Success
-                                    ? null
-                                    : result.FailureStage.ToString(),
-                                Message = result.Success
-                                    ? "Print completed"
-                                    : result.Message
+                                FailureStage = result.Success ? null : result.FailureStage.ToString(),
+                                Message = result.Success ? "Print completed" : result.Message
                             },
                             stoppingToken,
                             connectTimeoutMilliseconds: NodeConnectTimeoutMs);
 
-                        var archivePath =
-                            Path.Combine(
-                                archiveDirectory,
-                                Path.GetFileName(file));
+                        var archivePdfPath = Path.Combine(archiveDirectory, Path.GetFileName(pdfFile));
+                        var archiveJsonPath = Path.Combine(archiveDirectory, Path.GetFileName(jsonFile));
 
-                        _logger.LogInformation(
-                            "Archiving file to: {path}",
-                            archivePath);
+                        File.Move(pdfFile, archivePdfPath, true);
+                        File.Move(jsonFile, archiveJsonPath, true);
 
-                        File.Move(
-                            file,
-                            archivePath,
-                            true);
-
-                        _logger.LogInformation(
-                            "File archived successfully");
+                        _logger.LogInformation("Files archived successfully");
                     }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                     {
@@ -154,14 +149,11 @@ public class PrintQueueWatcherService : BackgroundService
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(
-                            ex,
-                            "Queue watcher failed while processing file: {file}",
-                            file);
+                        _logger.LogError(ex, "Queue watcher failed while processing file: {file}", jsonFile);
                     }
                     finally
                     {
-                        _processingFiles.Remove(file);
+                        _processingFiles.Remove(jsonFile);
                     }
                 }
             }
