@@ -56,6 +56,42 @@ public class PrintServiceTests
         Assert.Contains("timeout", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void BuildPrintProcess_FormatsArgumentsCorrectly()
+    {
+        var request = new PrintJobRequest
+        {
+            FilePath = @"C:\PrintBit\sample.pdf",
+            PrinterName = "MyPrinter",
+            Settings = new PrintJobSettings
+            {
+                Copies = 2,
+                Color = true,
+                PageRange = "1-3",
+                Orientation = "landscape"
+            }
+        };
+
+        using var process = PrintService.BuildPrintProcess("SumatraPDF.exe", request);
+
+        Assert.Contains("-print-settings \"2x,color,1-3,landscape\"", process.StartInfo.Arguments);
+    }
+
+    [Fact]
+    public void BuildPrintProcess_DefaultsToMonochromeAnd1Copy()
+    {
+        var request = new PrintJobRequest
+        {
+            FilePath = @"C:\PrintBit\sample.pdf",
+            PrinterName = "MyPrinter",
+            Settings = new PrintJobSettings()
+        };
+
+        using var process = PrintService.BuildPrintProcess("SumatraPDF.exe", request);
+
+        Assert.Contains("-print-settings \"1x,monochrome\"", process.StartInfo.Arguments);
+    }
+
     private sealed class StubPrintService : PrintService
     {
         private readonly PrintJobResult _processResult;
