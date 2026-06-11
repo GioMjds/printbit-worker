@@ -13,6 +13,11 @@ public class PrintQueueWatcherService : BackgroundService
     // the worker, so the first event of a session would be lost.
     private const int NodeConnectTimeoutMs = 3_000;
 
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     private readonly HashSet<string> _processingFiles = [];
 
     private readonly ILogger<PrintQueueWatcherService> _logger;
@@ -73,14 +78,16 @@ public class PrintQueueWatcherService : BackgroundService
                         var pdfFile = Path.ChangeExtension(jsonFile, ".pdf");
                         if (!File.Exists(pdfFile))
                         {
-                            _logger.LogWarning("Found JSON sidecar {jsonFile} but missing PDF file. Skipping.", jsonFile);
+                            _logger.LogWarning("Found JSON sidecar {jsonFile} but missing PDF file. Archiving orphan.", jsonFile);
+                            var archiveOrphanPath = Path.Combine(archiveDirectory, Path.GetFileName(jsonFile));
+                            File.Move(jsonFile, archiveOrphanPath, true);
                             continue;
                         }
 
                         _logger.LogInformation("Detected print job: {pdfFile} with settings {jsonFile}", pdfFile, jsonFile);
 
                         var jsonContent = await File.ReadAllTextAsync(jsonFile, stoppingToken);
-                        var settings = JsonSerializer.Deserialize<PrintJobSettings>(jsonContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new PrintJobSettings();
+                        var settings = JsonSerializer.Deserialize<PrintJobSettings>(jsonContent, JsonOptions) ?? new PrintJobSettings();
 
                         var fileName = Path.GetFileName(pdfFile);
                         var correlation = TryParseCorrelation(fileName);
