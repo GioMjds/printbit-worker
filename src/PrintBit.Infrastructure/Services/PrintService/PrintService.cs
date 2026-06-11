@@ -257,10 +257,28 @@ public class PrintService : IPrintService
         return (false, $"Spooler job for '{expectedDocument}' did not clear before timeout");
     }
 
-    private static Process BuildPrintProcess(
+    internal static Process BuildPrintProcess(
         string sumatraPath,
         PrintJobRequest request)
     {
+        var settingsList = new List<string>
+        {
+            $"{Math.Max(1, request.Settings.Copies)}x",
+            request.Settings.Color ? "color" : "monochrome"
+        };
+
+        if (!string.IsNullOrWhiteSpace(request.Settings.PageRange))
+        {
+            settingsList.Add(request.Settings.PageRange);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Settings.Orientation))
+        {
+            settingsList.Add(request.Settings.Orientation);
+        }
+
+        var printSettingsArg = string.Join(",", settingsList);
+
         return new Process
         {
             StartInfo = new ProcessStartInfo
@@ -268,7 +286,7 @@ public class PrintService : IPrintService
                 FileName = sumatraPath,
                 Arguments =
                     $"-print-to \"{request.PrinterName}\" " +
-                    $"-print-settings \"{request.Copies}\" " +
+                    $"-print-settings \"{printSettingsArg}\" " +
                     $"-silent " +
                     $"\"{request.FilePath}\"",
                 CreateNoWindow = true,
