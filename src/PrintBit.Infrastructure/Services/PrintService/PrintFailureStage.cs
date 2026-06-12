@@ -8,5 +8,6 @@ public enum PrintFailureStage
     ProcessExit,
     Timeout,
     SpoolerVerification,
-    Unexpected
+    Unexpected,
+    HardwareError
 }

@@ -13,4 +13,6 @@ public class HardwareSettings
     public string PrinterName { get; set; } = "EPSON L5290 Series";
 
     public string PrintQueueDirectory { get; set; } = @"C:\Users\printbit\printbit-worker\queue";
+
+    public string SumatraPath { get; set; } = @"C:\Users\printbit\bin\SumatraPDF.exe";
 }

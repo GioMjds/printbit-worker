@@ -116,11 +116,13 @@ SumatraPDF.exe -print-to "<printerName>" -print-settings "<copies>" -silent "<fi
 ```
 
 Critical constraints:
-- `SumatraPDF.exe` path is currently `C:\Users\printbit\bin\SumatraPDF.exe`.
+- `SumatraPDF.exe` path comes from `HardwareSettings.SumatraPath` (default `C:\Users\printbit\bin\SumatraPDF.exe`).
 - Printer name comes from `HardwareSettings.PrinterName` and must exactly match Windows registration.
 - Print jobs are serialized via `SemaphoreSlim(1, 1)`.
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
+- Spooler verification inspects `Win32_PrintJob.StatusMask` for `ERROR` (`0x2`) and `PAPEROUT` (`0x40`) flags, and checks `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3: Low Paper, No Paper, Low Toner, No Toner, Door Open, Jammed, Offline, Service Requested, Output Bin Full).
+- Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
 - Any process or verification failure returns `Success = false` with stage detail.
 
 ### Named Pipe (Node Error Intake)
@@ -206,7 +208,7 @@ Dependency direction:
 | `PrintQueueWatcherService` | HardwareService | Watches queue directory, invokes `IPrintService`, and emits worker events |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
 | `PrinterMonitorService` | Infrastructure.Windows | Logs printer status and job info from Windows spooler |
-| `PrintService` | Infrastructure | Sumatra process + spooler verification + print lock |
+| `PrintService` | Infrastructure | Sumatra process + spooler verification (incl. `StatusMask` and `DetectedErrorState` hardware error checks) + print lock |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 
 Legacy ESP32/orchestrator classes remain in the codebase but are not wired in the printer-only runtime.
@@ -242,7 +244,8 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "WatchdogIntervalSeconds": 5,
     "PrintTimeoutSeconds": 120,
     "PrinterName": "EPSON L5290 Series",
-    "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue"
+    "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue",
+    "SumatraPath": "C:\\Users\\printbit\\bin\\SumatraPDF.exe"
   },
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
@@ -398,6 +401,7 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - Exact printer-name matching is required.
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)`).
 - Success requires both process success and spooler lifecycle verification.
+- Spooler verification checks `Win32_PrintJob.StatusMask` for error/paperout flags and `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3). Hardware errors return `PrintFailureStage.HardwareError` without triggering recovery.
 - Queue watcher print requests go directly to `PrintService` (no transaction gate).
 
 ### State Machine

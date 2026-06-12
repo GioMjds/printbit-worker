@@ -92,6 +92,84 @@ public class PrintServiceTests
         Assert.Contains("-print-settings \"1x,monochrome\"", process.StartInfo.Arguments);
     }
 
+    [Fact]
+    public async Task HardwareError_PaperOut_ReturnsHardwareErrorFailure()
+    {
+        var sut = new StubPrintService(
+            new PrintJobResult
+            {
+                Success = true,
+                ProcessSucceeded = true,
+                Message = "process ok",
+                ExitCode = 0
+            },
+            verificationResult: (false, "Printer hardware error: No Paper (code 4)"));
+
+        var result = await sut.PrintAsync(
+            new PrintJobRequest
+            {
+                FilePath = @"C:\PrintBit\sample.pdf",
+                PrinterName = "EPSON L5290 Series"
+            });
+
+        Assert.False(result.Success);
+        Assert.Equal(PrintFailureStage.HardwareError, result.FailureStage);
+        Assert.True(result.ProcessSucceeded);
+        Assert.Contains("No Paper", result.Message);
+    }
+
+    [Fact]
+    public async Task HardwareError_Jammed_ReturnsHardwareErrorFailure()
+    {
+        var sut = new StubPrintService(
+            new PrintJobResult
+            {
+                Success = true,
+                ProcessSucceeded = true,
+                Message = "process ok",
+                ExitCode = 0
+            },
+            verificationResult: (false, "Printer hardware error: Jammed (code 8)"));
+
+        var result = await sut.PrintAsync(
+            new PrintJobRequest
+            {
+                FilePath = @"C:\PrintBit\sample.pdf",
+                PrinterName = "EPSON L5290 Series"
+            });
+
+        Assert.False(result.Success);
+        Assert.Equal(PrintFailureStage.HardwareError, result.FailureStage);
+        Assert.True(result.ProcessSucceeded);
+        Assert.Contains("Jammed", result.Message);
+    }
+
+    [Fact]
+    public async Task HardwareError_JobErrorFlags_ReturnsHardwareErrorFailure()
+    {
+        var sut = new StubPrintService(
+            new PrintJobResult
+            {
+                Success = true,
+                ProcessSucceeded = true,
+                Message = "process ok",
+                ExitCode = 0
+            },
+            verificationResult: (false, "Print job error detected (StatusMask=0x42, JobStatus=Error)"));
+
+        var result = await sut.PrintAsync(
+            new PrintJobRequest
+            {
+                FilePath = @"C:\PrintBit\sample.pdf",
+                PrinterName = "EPSON L5290 Series"
+            });
+
+        Assert.False(result.Success);
+        Assert.Equal(PrintFailureStage.HardwareError, result.FailureStage);
+        Assert.True(result.ProcessSucceeded);
+        Assert.Contains("StatusMask", result.Message);
+    }
+
     private sealed class StubPrintService : PrintService
     {
         private readonly PrintJobResult _processResult;
@@ -134,6 +212,12 @@ public class PrintServiceTests
             CancellationToken cancellationToken)
         {
             return Task.FromResult(_verificationResult);
+        }
+
+        protected override (bool HasError, int ErrorCode, string Description) CheckPrinterErrorState(
+            string printerName)
+        {
+            return (false, 0, "No Error");
         }
     }
 }

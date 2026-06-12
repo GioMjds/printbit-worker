@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace PrintBit.Infrastructure.Services.PrintService;
@@ -24,6 +24,8 @@ public class PrintRecoveryService : IPrintRecoveryService
             KillProcess("SumatraPDF");
 
             KillProcess("PDFtoPrinter");
+
+            KillProcess("E_YARNYRE"); // Epson Status Monitor 3 (L5290)
 
             await RestartSpoolerAsync();
 

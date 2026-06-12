@@ -4,6 +4,8 @@ using System.Runtime.Versioning;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PrintBit.Shared.Configurations;
+using System.Runtime.InteropServices;
+using System.Text;
 
 namespace PrintBit.Infrastructure.Services.PrintService;
 
@@ -84,12 +86,20 @@ public class PrintService : IPrintService
 
             if (!verification.Success)
             {
+                var isHardwareError = verification.Message.StartsWith("Printer hardware error", StringComparison.Ordinal)
+                    || verification.Message.StartsWith("Print job error detected", StringComparison.Ordinal);
+
+                var failureStage = isHardwareError
+                    ? PrintFailureStage.HardwareError
+                    : PrintFailureStage.SpoolerVerification;
+
                 _logger.LogError(
-                    "Print verification failed: {message}",
+                    "Print verification failed | Stage={stage} | Message={message}",
+                    failureStage,
                     verification.Message);
 
                 return PrintJobResult.Failed(
-                    PrintFailureStage.SpoolerVerification,
+                    failureStage,
                     verification.Message,
                     processResult.ExitCode);
             }
@@ -137,7 +147,7 @@ public class PrintService : IPrintService
 
     protected virtual string GetSumatraExecutablePath()
     {
-        return @"C:\Users\printbit\bin\SumatraPDF.exe";
+        return _settings.SumatraPath;
     }
 
     protected virtual async Task<PrintJobResult> ExecutePrintProcessAsync(
@@ -227,6 +237,48 @@ public class PrintService : IPrintService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            // ── Printer-level hardware error check ──────────────────────
+            var printerError = CheckPrinterErrorState(printerName);
+
+            if (printerError.HasError)
+            {
+                _logger.LogError(
+                    "Printer hardware error during verification: {description} (code {code})",
+                    printerError.Description,
+                    printerError.ErrorCode);
+
+                return (false,
+                    $"Printer hardware error: {printerError.Description} (code {printerError.ErrorCode})");
+            }
+
+            // ── Epson Status Monitor Popup Check ────────────────────────
+            var epsonPopup = CheckEpsonStatusMonitorPopup();
+
+            if (epsonPopup.HasPopup)
+            {
+                _logger.LogError(
+                    "Epson Status Monitor popup detected ('{title}', PID {pid}). This indicates a hardware error (e.g., Paper Out) that the driver is hiding from the spooler.",
+                    epsonPopup.WindowTitle,
+                    epsonPopup.ProcessId);
+
+                if (epsonPopup.ProcessId > 0)
+                {
+                    try
+                    {
+                        var popupProcess = Process.GetProcessById(epsonPopup.ProcessId);
+                        popupProcess.Kill(true);
+                        _logger.LogInformation("Killed Epson Status Monitor process {pid} to unblock UI.", epsonPopup.ProcessId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to kill Epson Status Monitor process {pid}", epsonPopup.ProcessId);
+                    }
+                }
+
+                return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)");
+            }
+
+            // ── Job-level status check ───────────────────────────────────
             var matchingJobs = GetMatchingJobs(
                 printerName,
                 expectedDocument);
@@ -235,12 +287,74 @@ public class PrintService : IPrintService
             {
                 seenMatchingJob = true;
 
+                foreach (var job in matchingJobs)
+                {
+                    // StatusMask flags: ERROR = 0x2, PAPEROUT = 0x40
+                    const uint errorFlag = 0x2;
+                    const uint paperOutFlag = 0x40;
+
+                    if ((job.StatusMask & (errorFlag | paperOutFlag)) != 0)
+                    {
+                        _logger.LogError(
+                            "Print job has error flags | StatusMask=0x{mask:X} JobStatus={jobStatus}",
+                            job.StatusMask,
+                            job.JobStatus);
+
+                        return (false,
+                            $"Print job error detected (StatusMask=0x{job.StatusMask:X}, JobStatus={job.JobStatus})");
+                    }
+                }
+
                 _logger.LogInformation(
                     "Spooler verification observed matching print job(s): {count}",
                     matchingJobs.Count);
             }
             else if (seenMatchingJob)
             {
+                // Job appeared then disappeared without error flags —
+                // Because Epson drivers absorb the job quickly and may show a popup seconds later,
+                // we must wait a brief period and check for the popup.
+                for (int i = 0; i < 5; i++)
+                {
+                    await Task.Delay(1000, cancellationToken);
+
+                    var finalPopup = CheckEpsonStatusMonitorPopup();
+                    if (finalPopup.HasPopup)
+                    {
+                        _logger.LogError(
+                            "Epson Status Monitor popup detected after job cleared ('{title}', PID {pid}).",
+                            finalPopup.WindowTitle,
+                            finalPopup.ProcessId);
+
+                        if (finalPopup.ProcessId > 0)
+                        {
+                            try
+                            {
+                                var popupProcess = Process.GetProcessById(finalPopup.ProcessId);
+                                popupProcess.Kill(true);
+                                _logger.LogInformation("Killed Epson Status Monitor process {pid} to unblock UI.", finalPopup.ProcessId);
+                            }
+                            catch { }
+                        }
+
+                        return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)");
+                    }
+                }
+
+                // confirm the printer is still healthy before declaring success.
+                var finalCheck = CheckPrinterErrorState(printerName);
+
+                if (finalCheck.HasError)
+                {
+                    _logger.LogError(
+                        "Printer hardware error detected after job cleared: {description} (code {code})",
+                        finalCheck.Description,
+                        finalCheck.ErrorCode);
+
+                    return (false,
+                        $"Printer hardware error: {finalCheck.Description} (code {finalCheck.ErrorCode})");
+                }
+
                 return (true, "Spooler lifecycle verified");
             }
 
@@ -255,6 +369,46 @@ public class PrintService : IPrintService
         }
 
         return (false, $"Spooler job for '{expectedDocument}' did not clear before timeout");
+    }
+
+    /// <summary>
+    /// Queries Win32_Printer.DetectedErrorState for the named printer.
+    /// Codes ≥ 3 are treated as fatal hardware errors.
+    /// </summary>
+    protected virtual (bool HasError, int ErrorCode, string Description) CheckPrinterErrorState(
+        string printerName)
+    {
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT DetectedErrorState FROM Win32_Printer WHERE Name = '{printerName}'");
+
+            foreach (ManagementObject printer in searcher.Get())
+            {
+                var raw = printer["DetectedErrorState"];
+
+                if (raw is null)
+                {
+                    continue;
+                }
+
+                var errorCode = Convert.ToInt32(raw);
+
+                // Codes 0 (Unknown), 1 (Other), 2 (No Error) are non-fatal.
+                if (errorCode >= FatalErrorThreshold)
+                {
+                    return (true, errorCode, DetectedErrorStateDescription(errorCode));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to query printer error state — skipping hardware check");
+        }
+
+        return (false, 0, "No Error");
     }
 
     internal static Process BuildPrintProcess(
@@ -318,14 +472,21 @@ public class PrintService : IPrintService
         }
     }
 
-    private List<(string Name, string Document)> GetMatchingJobs(
+    /// <summary>
+    /// The minimum DetectedErrorState code treated as a fatal hardware error.
+    /// Codes: 3=LowPaper, 4=NoPaper, 5=LowToner, 6=NoToner, 7=DoorOpen,
+    ///        8=Jammed, 9=Offline, 10=ServiceRequested, 11=OutputBinFull.
+    /// </summary>
+    private const int FatalErrorThreshold = 3;
+
+    private List<(string Name, string Document, uint StatusMask, string JobStatus)> GetMatchingJobs(
         string printerName,
         string expectedDocument)
     {
-        var matches = new List<(string Name, string Document)>();
+        var matches = new List<(string Name, string Document, uint StatusMask, string JobStatus)>();
 
         using var searcher = new ManagementObjectSearcher(
-            "SELECT Name, Document FROM Win32_PrintJob");
+            "SELECT Name, Document, StatusMask, JobStatus FROM Win32_PrintJob");
 
         foreach (ManagementObject job in searcher.Get())
         {
@@ -335,10 +496,82 @@ public class PrintService : IPrintService
             if (jobName.Contains(printerName, StringComparison.OrdinalIgnoreCase) &&
                 document.Contains(expectedDocument, StringComparison.OrdinalIgnoreCase))
             {
-                matches.Add((jobName, document));
+                var statusMask = Convert.ToUInt32(job["StatusMask"] ?? 0u);
+                var jobStatus = job["JobStatus"]?.ToString() ?? string.Empty;
+
+                matches.Add((jobName, document, statusMask, jobStatus));
             }
         }
 
         return matches;
+    }
+
+    private static string DetectedErrorStateDescription(int code) => code switch
+    {
+        0 => "Unknown",
+        1 => "Other",
+        2 => "No Error",
+        3 => "Low Paper",
+        4 => "No Paper",
+        5 => "Low Toner",
+        6 => "No Toner",
+        7 => "Door Open",
+        8 => "Jammed",
+        9 => "Offline",
+        10 => "Service Requested",
+        11 => "Output Bin Full",
+        _ => $"Unknown Error ({code})"
+    };
+
+    // ── Epson Status Monitor Detection (P/Invoke) ──────────────────────────
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder strText, int maxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    protected virtual (bool HasPopup, int ProcessId, string WindowTitle) CheckEpsonStatusMonitorPopup()
+    {
+        bool found = false;
+        int targetPid = 0;
+        string foundTitle = string.Empty;
+
+        try
+        {
+            EnumWindows((hWnd, lParam) =>
+            {
+                if (IsWindowVisible(hWnd))
+                {
+                    var sb = new StringBuilder(256);
+                    GetWindowText(hWnd, sb, 256);
+                    string title = sb.ToString();
+
+                    // Detect Epson Status Monitor popup
+                    if (title.StartsWith("EPSON Status Monitor 3", StringComparison.OrdinalIgnoreCase))
+                    {
+                        GetWindowThreadProcessId(hWnd, out uint pid);
+                        found = true;
+                        targetPid = (int)pid;
+                        foundTitle = title;
+                        return false; // stop enumerating
+                    }
+                }
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to enumerate windows for Epson Status Monitor check.");
+        }
+
+        return (found, targetPid, foundTitle);
     }
 }

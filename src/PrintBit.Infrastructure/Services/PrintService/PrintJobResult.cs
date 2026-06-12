@@ -22,7 +22,8 @@ public class PrintJobResult
         return new PrintJobResult
         {
             Success = false,
-            ProcessSucceeded = stage == PrintFailureStage.SpoolerVerification,
+            ProcessSucceeded = stage is PrintFailureStage.SpoolerVerification
+                                    or PrintFailureStage.HardwareError,
             VerificationSucceeded = false,
             FailureStage = stage,
             Message = message,
