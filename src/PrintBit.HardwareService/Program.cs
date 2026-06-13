@@ -20,6 +20,8 @@ builder.Services.AddSingleton<IPrintService, PrintService>();
 
 builder.Services.AddSingleton<IPrintRecoveryService, PrintRecoveryService>();
 
+builder.Services.AddSingleton<IPrintHealthCoordinator, PrintHealthCoordinator>();
+
 builder.Services.AddSingleton<WorkerEventPipeClient>();
 
 var host = builder.Build();

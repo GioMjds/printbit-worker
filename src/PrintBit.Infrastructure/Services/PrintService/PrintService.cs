@@ -15,21 +15,25 @@ public class PrintService : IPrintService
     private static readonly SemaphoreSlim PrintLock = new(1, 1);
 
     protected const int VerificationTimeoutSeconds = 45;
+    protected const int PostClearGuardWindowSeconds = 12;
 
     private readonly ILogger<PrintService> _logger;
 
     private readonly HardwareSettings _settings;
 
     private readonly IPrintRecoveryService _recoveryService;
+    private readonly IPrintHealthCoordinator _printHealthCoordinator;
 
     public PrintService(
         ILogger<PrintService> logger,
         IOptions<HardwareSettings> options,
-        IPrintRecoveryService recoveryService)
+        IPrintRecoveryService recoveryService,
+        IPrintHealthCoordinator printHealthCoordinator)
     {
         _logger = logger;
         _settings = options.Value;
         _recoveryService = recoveryService;
+        _printHealthCoordinator = printHealthCoordinator;
     }
 
     public async Task<PrintJobResult> PrintAsync(
@@ -68,6 +72,9 @@ public class PrintService : IPrintService
                 "Starting print job | Printer: {printer} | File: {file}",
                 request.PrinterName,
                 request.FilePath);
+            using var printAttempt = _printHealthCoordinator.BeginAttempt(
+                request.PrinterName,
+                Path.GetFileName(request.FilePath));
 
             var processResult = await ExecutePrintProcessAsync(
                 request,
@@ -236,6 +243,14 @@ public class PrintService : IPrintService
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (_printHealthCoordinator.TryGetFatalHardwareError(printerName, out var signaledError))
+            {
+                _logger.LogError(
+                    "Printer hardware error signaled by monitor: {message} (code {code})",
+                    signaledError.Message,
+                    signaledError.ErrorCode);
+                return (false, $"Printer hardware error: {signaledError.Message} (code {signaledError.ErrorCode})");
+            }
 
             // ── Printer-level hardware error check ──────────────────────
             var printerError = CheckPrinterErrorState(printerName);
@@ -311,13 +326,22 @@ public class PrintService : IPrintService
             }
             else if (seenMatchingJob)
             {
-                // Job appeared then disappeared without error flags —
-                // Because Epson drivers absorb the job quickly and may show a popup seconds later,
-                // we must wait a brief period and check for the popup.
-                for (int i = 0; i < 5; i++)
+                _logger.LogInformation(
+                    "Spooler job cleared; entering {seconds}s post-clear hardware guard window",
+                    PostClearGuardWindowSeconds);
+
+                for (int i = 0; i < PostClearGuardWindowSeconds; i++)
                 {
                     await Task.Delay(1000, cancellationToken);
 
+                    if (_printHealthCoordinator.TryGetFatalHardwareError(printerName, out var delayedSignal))
+                    {
+                        _logger.LogError(
+                            "Fatal hardware error signaled during post-clear guard: {message} (code {code})",
+                            delayedSignal.Message,
+                            delayedSignal.ErrorCode);
+                        return (false, $"Printer hardware error: {delayedSignal.Message} (code {delayedSignal.ErrorCode})");
+                    }
                     var finalPopup = CheckEpsonStatusMonitorPopup();
                     if (finalPopup.HasPopup)
                     {

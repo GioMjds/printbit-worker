@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PrintBit.Infrastructure.IPC;
+using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 
 namespace PrintBit.Infrastructure.Windows.PrinterMonitoring;
@@ -18,6 +19,7 @@ public class PrinterMonitorService : BackgroundService
     private readonly ILogger<PrinterMonitorService> _logger;
     private readonly HardwareSettings _hardwareSettings;
     private readonly WorkerEventPipeClient _eventPipe;
+    private readonly IPrintHealthCoordinator _printHealthCoordinator;
 
     // Track last known state to avoid flooding the pipe with repeat events.
     private bool? _lastOfflineState = null;
@@ -31,11 +33,13 @@ public class PrinterMonitorService : BackgroundService
     public PrinterMonitorService(
         ILogger<PrinterMonitorService> logger,
         IOptions<HardwareSettings> hardwareOptions,
-        WorkerEventPipeClient eventPipe)
+        WorkerEventPipeClient eventPipe,
+        IPrintHealthCoordinator printHealthCoordinator)
     {
         _logger = logger;
         _hardwareSettings = hardwareOptions.Value;
         _eventPipe = eventPipe;
+        _printHealthCoordinator = printHealthCoordinator;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -95,19 +99,38 @@ public class PrinterMonitorService : BackgroundService
                     isOffline ? "OFFLINE" : "back ONLINE");
             }
 
-            // ── Error state change detection ─────────────────────────────────
-            if (_lastErrorState != errorState && errorState != "0")
+            if (errorState == "0")
             {
-                _lastErrorState = errorState;
-                _pendingEvent = new WorkerPrintEvent
-                {
-                    Type = WorkerPrintEventType.PrinterError,
-                    PrinterName = _hardwareSettings.PrinterName,
-                    FailureStage = "hardware_error",
-                    Message = $"Printer hardware error detected (code {errorState}). Check paper, ink, or connection.",
-                };
+                _lastErrorState = null;
+            }
 
-                _logger.LogWarning("Printer error detected: {error}", errorState);
+            // ── Error state change detection (fatal only: >= 3) ─────────────
+            var parsedErrorCode = int.TryParse(errorState, out var code) ? code : 0;
+            var isFatalError = parsedErrorCode >= 3;
+
+            if (isFatalError)
+            {
+                _printHealthCoordinator.ReportFatalHardwareError(
+                    _hardwareSettings.PrinterName,
+                    parsedErrorCode,
+                    $"{DetectedErrorStateDescription(parsedErrorCode)}");
+
+                if (_lastErrorState != errorState)
+                {
+                    _lastErrorState = errorState;
+                    _pendingEvent = new WorkerPrintEvent
+                    {
+                        Type = WorkerPrintEventType.PrinterError,
+                        PrinterName = _hardwareSettings.PrinterName,
+                        FailureStage = "hardware_error",
+                        Message = $"Printer hardware error detected ({DetectedErrorStateDescription(parsedErrorCode)}, code {errorState}). Check paper, ink, or connection.",
+                    };
+
+                    _logger.LogWarning(
+                        "Fatal printer hardware error detected: {description} (code {error})",
+                        DetectedErrorStateDescription(parsedErrorCode),
+                        errorState);
+                }
             }
         }
 
@@ -119,6 +142,23 @@ public class PrinterMonitorService : BackgroundService
             _pendingEvent = null;
         }
     }
+
+    private static string DetectedErrorStateDescription(int code) => code switch
+    {
+        0 => "Unknown",
+        1 => "Other",
+        2 => "No Error",
+        3 => "Low Paper",
+        4 => "No Paper",
+        5 => "Low Toner",
+        6 => "No Toner",
+        7 => "Door Open",
+        8 => "Jammed",
+        9 => "Offline",
+        10 => "Service Requested",
+        11 => "Output Bin Full",
+        _ => $"Unknown Error ({code})"
+    };
 
     private void MonitorPrintJobs()
     {

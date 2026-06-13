@@ -122,6 +122,8 @@ Critical constraints:
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
 - Spooler verification inspects `Win32_PrintJob.StatusMask` for `ERROR` (`0x2`) and `PAPEROUT` (`0x40`) flags, and checks `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3: Low Paper, No Paper, Low Toner, No Toner, Door Open, Jammed, Offline, Service Requested, Output Bin Full).
+- After a spooler job clears, `PrintService` keeps a 12-second post-clear hardware guard window to catch delayed Epson popup / monitor hardware signals before returning success.
+- `PrinterMonitorService` now treats `DetectedErrorState` as fatal only when code ≥ 3 and publishes those fatal signals through `IPrintHealthCoordinator` for in-flight print attempts.
 - Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
 - Any process or verification failure returns `Success = false` with stage detail.
 
@@ -207,8 +209,9 @@ Dependency direction:
 |---|---|---|
 | `PrintQueueWatcherService` | HardwareService | Watches queue directory, invokes `IPrintService`, and emits worker events |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
-| `PrinterMonitorService` | Infrastructure.Windows | Logs printer status and job info from Windows spooler |
-| `PrintService` | Infrastructure | Sumatra process + spooler verification (incl. `StatusMask` and `DetectedErrorState` hardware error checks) + print lock |
+| `PrinterMonitorService` | Infrastructure.Windows | Logs printer status and job info from Windows spooler, emits printer monitor events, and reports fatal hardware states to `IPrintHealthCoordinator` |
+| `PrintService` | Infrastructure | Sumatra process + spooler verification (incl. `StatusMask` and `DetectedErrorState` hardware error checks), 12-second post-clear hardware guard, and print lock |
+| `PrintHealthCoordinator` | Infrastructure | In-memory singleton coordinating fatal hardware signals between `PrinterMonitorService` and active `PrintService` attempts |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 
 Legacy ESP32/orchestrator classes remain in the codebase but are not wired in the printer-only runtime.
@@ -229,6 +232,7 @@ builder.Services.AddHostedService<PrinterMonitorService>();
 
 builder.Services.AddSingleton<IPrintService, PrintService>();
 builder.Services.AddSingleton<IPrintRecoveryService, PrintRecoveryService>();
+builder.Services.AddSingleton<IPrintHealthCoordinator, PrintHealthCoordinator>();
 builder.Services.AddSingleton<WorkerEventPipeClient>();
 ```
 
@@ -402,6 +406,8 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)`).
 - Success requires both process success and spooler lifecycle verification.
 - Spooler verification checks `Win32_PrintJob.StatusMask` for error/paperout flags and `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3). Hardware errors return `PrintFailureStage.HardwareError` without triggering recovery.
+- `PrintService` enforces a 12-second post-clear guard window before success to detect delayed Epson popup/hardware faults.
+- `PrinterMonitorService` reports only fatal `DetectedErrorState` codes (≥ 3) to Node.js as `PrinterError` and to in-flight print attempts via `IPrintHealthCoordinator`.
 - Queue watcher print requests go directly to `PrintService` (no transaction gate).
 
 ### State Machine

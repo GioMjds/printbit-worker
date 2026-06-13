@@ -182,7 +182,8 @@ public class PrintServiceTests
             : base(
                 NullLogger<PrintService>.Instance,
                 Options.Create(new HardwareSettings()),
-                new FakeRecoveryService())
+                new FakeRecoveryService(),
+                new PrintHealthCoordinator())
         {
             _processResult = processResult;
             _verificationResult = verificationResult;
