@@ -8,6 +8,8 @@ public sealed record WorkerPrintEvent
 
     public string? SpoolerCorrelationKey { get; init; }
 
+    public string? SpoolerJobId { get; init; }
+
     public string? FileName { get; init; }
 
     public string? PrinterName { get; init; }

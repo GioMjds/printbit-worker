@@ -108,7 +108,8 @@ public class PrintService : IPrintService
                 return PrintJobResult.Failed(
                     failureStage,
                     verification.Message,
-                    processResult.ExitCode);
+                    processResult.ExitCode,
+                    verification.SpoolerJobId);
             }
 
             _logger.LogInformation(
@@ -121,7 +122,9 @@ public class PrintService : IPrintService
                 ProcessSucceeded = true,
                 VerificationSucceeded = true,
                 FailureStage = PrintFailureStage.None,
-                ExitCode = processResult.ExitCode
+                ExitCode = processResult.ExitCode,
+                SpoolerJobId = verification.SpoolerJobId,
+                SpoolerPrinterName = request.PrinterName
             };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -232,12 +235,13 @@ public class PrintService : IPrintService
         };
     }
 
-    protected virtual async Task<(bool Success, string Message)> VerifySpoolerLifecycleAsync(
+    protected virtual async Task<(bool Success, string Message, string? SpoolerJobId)> VerifySpoolerLifecycleAsync(
         string printerName,
         string expectedDocument,
         CancellationToken cancellationToken)
     {
         var seenMatchingJob = false;
+        string? lastSpoolerJobId = null;
         var deadline = DateTime.UtcNow.AddSeconds(VerificationTimeoutSeconds);
 
         while (DateTime.UtcNow < deadline)
@@ -249,7 +253,7 @@ public class PrintService : IPrintService
                     "Printer hardware error signaled by monitor: {message} (code {code})",
                     signaledError.Message,
                     signaledError.ErrorCode);
-                return (false, $"Printer hardware error: {signaledError.Message} (code {signaledError.ErrorCode})");
+                return (false, $"Printer hardware error: {signaledError.Message} (code {signaledError.ErrorCode})", lastSpoolerJobId);
             }
 
             // ── Printer-level hardware error check ──────────────────────
@@ -263,7 +267,7 @@ public class PrintService : IPrintService
                     printerError.ErrorCode);
 
                 return (false,
-                    $"Printer hardware error: {printerError.Description} (code {printerError.ErrorCode})");
+                    $"Printer hardware error: {printerError.Description} (code {printerError.ErrorCode})", lastSpoolerJobId);
             }
 
             // ── Epson Status Monitor Popup Check ────────────────────────
@@ -290,7 +294,7 @@ public class PrintService : IPrintService
                     }
                 }
 
-                return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)");
+                return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)", lastSpoolerJobId);
             }
 
             // ── Job-level status check ───────────────────────────────────
@@ -301,6 +305,10 @@ public class PrintService : IPrintService
             if (matchingJobs.Count > 0)
             {
                 seenMatchingJob = true;
+
+                lastSpoolerJobId = matchingJobs[0].Name.Contains(", ")
+                    ? matchingJobs[0].Name.Split(", ")[^1]
+                    : null;
 
                 foreach (var job in matchingJobs)
                 {
@@ -316,7 +324,7 @@ public class PrintService : IPrintService
                             job.JobStatus);
 
                         return (false,
-                            $"Print job error detected (StatusMask=0x{job.StatusMask:X}, JobStatus={job.JobStatus})");
+                            $"Print job error detected (StatusMask=0x{job.StatusMask:X}, JobStatus={job.JobStatus})", lastSpoolerJobId);
                     }
                 }
 
@@ -340,7 +348,7 @@ public class PrintService : IPrintService
                             "Fatal hardware error signaled during post-clear guard: {message} (code {code})",
                             delayedSignal.Message,
                             delayedSignal.ErrorCode);
-                        return (false, $"Printer hardware error: {delayedSignal.Message} (code {delayedSignal.ErrorCode})");
+                        return (false, $"Printer hardware error: {delayedSignal.Message} (code {delayedSignal.ErrorCode})", lastSpoolerJobId);
                     }
                     var finalPopup = CheckEpsonStatusMonitorPopup();
                     if (finalPopup.HasPopup)
@@ -361,7 +369,7 @@ public class PrintService : IPrintService
                             catch { }
                         }
 
-                        return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)");
+                        return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)", lastSpoolerJobId);
                     }
                 }
 
@@ -375,11 +383,10 @@ public class PrintService : IPrintService
                         finalCheck.Description,
                         finalCheck.ErrorCode);
 
-                    return (false,
-                        $"Printer hardware error: {finalCheck.Description} (code {finalCheck.ErrorCode})");
+                    return (false, $"Printer hardware error: {finalCheck.Description} (code {finalCheck.ErrorCode})", lastSpoolerJobId);
                 }
 
-                return (true, "Spooler lifecycle verified");
+                return (true, "Spooler lifecycle verified", lastSpoolerJobId);
             }
 
             await Task.Delay(
@@ -389,10 +396,10 @@ public class PrintService : IPrintService
 
         if (!seenMatchingJob)
         {
-            return (false, $"No spooler job observed for document '{expectedDocument}'");
+            return (false, $"No spooler job observed for document '{expectedDocument}'", lastSpoolerJobId);
         }
 
-        return (false, $"Spooler job for '{expectedDocument}' did not clear before timeout");
+        return (false, $"Spooler job for '{expectedDocument}' did not clear before timeout", lastSpoolerJobId);
     }
 
     /// <summary>
