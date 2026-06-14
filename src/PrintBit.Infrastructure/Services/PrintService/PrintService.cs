@@ -240,6 +240,66 @@ public class PrintService : IPrintService
         string expectedDocument,
         CancellationToken cancellationToken)
     {
+        var result = await VerifySpoolerLifecycleInternalAsync(printerName, expectedDocument, cancellationToken);
+        if (!result.Success)
+        {
+            CancelMatchingJobs(printerName, expectedDocument);
+        }
+        return result;
+    }
+
+    private void CancelMatchingJobs(string printerName, string expectedDocument)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "Searching for stuck print jobs to cancel for printer '{printer}' and document '{doc}'",
+                printerName,
+                expectedDocument);
+
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT * FROM Win32_PrintJob");
+
+            var cancelledCount = 0;
+            foreach (ManagementObject job in searcher.Get())
+            {
+                var jobName = job["Name"]?.ToString() ?? string.Empty;
+                var document = job["Document"]?.ToString() ?? string.Empty;
+
+                if (jobName.Contains(printerName, StringComparison.OrdinalIgnoreCase) &&
+                    document.Contains(expectedDocument, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "Cancelling/Deleting stuck print job from Windows spooler: Name='{name}', Document='{doc}', JobStatus='{status}'",
+                        jobName,
+                        document,
+                        job["JobStatus"]);
+                    
+                    job.Delete();
+                    cancelledCount++;
+                }
+            }
+
+            if (cancelledCount > 0)
+            {
+                _logger.LogInformation("Successfully cancelled {count} stuck print job(s)", cancelledCount);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Failed to cancel stuck print jobs for printer '{printer}' and document '{doc}'",
+                printerName,
+                expectedDocument);
+        }
+    }
+
+    protected virtual async Task<(bool Success, string Message, string? SpoolerJobId)> VerifySpoolerLifecycleInternalAsync(
+        string printerName,
+        string expectedDocument,
+        CancellationToken cancellationToken)
+    {
         var seenMatchingJob = false;
         string? lastSpoolerJobId = null;
         var deadline = DateTime.UtcNow.AddSeconds(VerificationTimeoutSeconds);
