@@ -633,6 +633,9 @@ public class PrintService : IPrintService
     [DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
 
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc enumProc, IntPtr lParam);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hWnd, StringBuilder strText, int maxCount);
 
@@ -641,6 +644,15 @@ public class PrintService : IPrintService
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    private static readonly string[] EpsonErrorKeywords = new[]
+    {
+        "paper out", "out of paper", "load paper", "no paper", "kehabisan kertas", "isi kertas",
+        "paper jam", "jammed", "kertas macet", "jam",
+        "service required", "service request",
+        "ink out", "replace ink", "kehabisan tinta",
+        "error", "fatal", "problem", "cannot print", "unable to print"
+    };
 
     protected virtual (bool HasPopup, int ProcessId, string WindowTitle) CheckEpsonStatusMonitorPopup()
     {
@@ -658,14 +670,46 @@ public class PrintService : IPrintService
                     GetWindowText(hWnd, sb, 256);
                     string title = sb.ToString();
 
-                    // Detect Epson Status Monitor popup
+                    // Detect Epson Status Monitor window
                     if (title.StartsWith("EPSON Status Monitor 3", StringComparison.OrdinalIgnoreCase))
                     {
-                        GetWindowThreadProcessId(hWnd, out uint pid);
-                        found = true;
-                        targetPid = (int)pid;
-                        foundTitle = title;
-                        return false; // stop enumerating
+                        var windowTextBuilder = new StringBuilder();
+                        windowTextBuilder.AppendLine(title);
+
+                        EnumChildWindows(hWnd, (childHwnd, childLParam) =>
+                        {
+                            if (IsWindowVisible(childHwnd))
+                            {
+                                var childSb = new StringBuilder(256);
+                                GetWindowText(childHwnd, childSb, 256);
+                                if (childSb.Length > 0)
+                                {
+                                    windowTextBuilder.AppendLine(childSb.ToString());
+                                }
+                            }
+                            return true;
+                        }, IntPtr.Zero);
+
+                        string fullContent = windowTextBuilder.ToString();
+
+                        bool isActualError = false;
+                        foreach (var keyword in EpsonErrorKeywords)
+                        {
+                            if (fullContent.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                            {
+                                isActualError = true;
+                                break;
+                            }
+                        }
+
+                        if (isActualError)
+                        {
+                            GetWindowThreadProcessId(hWnd, out uint pid);
+                            found = true;
+                            targetPid = (int)pid;
+                            foundTitle = title;
+                            return false; // stop enumerating
+                        }
                     }
                 }
                 return true;
