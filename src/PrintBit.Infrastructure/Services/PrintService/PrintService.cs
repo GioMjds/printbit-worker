@@ -243,13 +243,22 @@ public class PrintService : IPrintService
         var result = await VerifySpoolerLifecycleInternalAsync(printerName, expectedDocument, cancellationToken);
         if (!result.Success)
         {
-            CancelMatchingJobs(printerName, expectedDocument);
+            CancelMatchingJobs(printerName, expectedDocument, result.SpoolerJobId);
         }
         return result;
     }
 
-    private void CancelMatchingJobs(string printerName, string expectedDocument)
+    private void CancelMatchingJobs(string printerName, string expectedDocument, string? spoolerJobId)
     {
+        if (string.IsNullOrWhiteSpace(spoolerJobId))
+        {
+            _logger.LogWarning(
+                "Skipping stuck print job cancellation because no spooler job ID was observed for printer '{printer}' and document '{doc}'",
+                printerName,
+                expectedDocument);
+            return;
+        }
+
         try
         {
             _logger.LogInformation(
@@ -265,8 +274,12 @@ public class PrintService : IPrintService
             {
                 var jobName = job["Name"]?.ToString() ?? string.Empty;
                 var document = job["Document"]?.ToString() ?? string.Empty;
+                var separatorIndex = jobName.LastIndexOf(", ", StringComparison.Ordinal);
+                var jobPrinterName = separatorIndex >= 0 ? jobName[..separatorIndex] : jobName;
+                var jobId = separatorIndex >= 0 ? jobName[(separatorIndex + 2)..] : string.Empty;
 
-                if (jobName.Contains(printerName, StringComparison.OrdinalIgnoreCase) &&
+                if (string.Equals(jobPrinterName, printerName, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(jobId, spoolerJobId, StringComparison.Ordinal) &&
                     document.Contains(expectedDocument, StringComparison.OrdinalIgnoreCase))
                 {
                     _logger.LogWarning(

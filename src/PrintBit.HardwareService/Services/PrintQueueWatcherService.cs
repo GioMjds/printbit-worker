@@ -43,7 +43,7 @@ public class PrintQueueWatcherService : BackgroundService
     protected override async Task ExecuteAsync(
         CancellationToken stoppingToken)
     {
-        var queueDirectory = _settings.PrintQueueDirectory;
+        var queueDirectory = Path.GetFullPath(_settings.PrintQueueDirectory);
         var failedDirectory =
             Path.Combine(
                 Path.GetDirectoryName(queueDirectory) ?? AppContext.BaseDirectory,
