@@ -11,6 +11,7 @@
 *.sln.docstates
 archive
 queue
+failed
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

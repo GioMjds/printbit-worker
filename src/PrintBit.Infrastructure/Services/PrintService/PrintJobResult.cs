@@ -14,10 +14,15 @@ public class PrintJobResult
 
     public int? ExitCode { get; set; }
 
+    public string? SpoolerJobId { get; set; }
+
+    public string? SpoolerPrinterName { get; set; }
+
     public static PrintJobResult Failed(
         PrintFailureStage stage,
         string message,
-        int? exitCode = null)
+        int? exitCode = null,
+        string? spoolerJobId = null)
     {
         return new PrintJobResult
         {
@@ -27,7 +32,8 @@ public class PrintJobResult
             VerificationSucceeded = false,
             FailureStage = stage,
             Message = message,
-            ExitCode = exitCode
+            ExitCode = exitCode,
+            SpoolerJobId = spoolerJobId
         };
     }
 }

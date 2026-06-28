@@ -126,6 +126,7 @@ Critical constraints:
 - `PrinterMonitorService` now treats `DetectedErrorState` as fatal only when code ≥ 3 and publishes those fatal signals through `IPrintHealthCoordinator` for in-flight print attempts.
 - Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
 - Any process or verification failure returns `Success = false` with stage detail.
+- When verification fails, any matching print jobs in the Windows spooler queue are automatically cancelled/deleted via WMI to clear the printer's hardware queue and prevent subsequent jobs from being blocked.
 
 ### Named Pipe (Node Error Intake)
 
@@ -406,6 +407,7 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)`).
 - Success requires both process success and spooler lifecycle verification.
 - Spooler verification checks `Win32_PrintJob.StatusMask` for error/paperout flags and `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3). Hardware errors return `PrintFailureStage.HardwareError` without triggering recovery.
+- Upon any spooler verification failure, matching print jobs are programmatically cancelled from the Windows spooler queue (via WMI) to ensure the printer queue remains clean.
 - `PrintService` enforces a 12-second post-clear guard window before success to detect delayed Epson popup/hardware faults.
 - `PrinterMonitorService` reports only fatal `DetectedErrorState` codes (≥ 3) to Node.js as `PrinterError` and to in-flight print attempts via `IPrintHealthCoordinator`.
 - Queue watcher print requests go directly to `PrintService` (no transaction gate).

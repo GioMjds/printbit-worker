@@ -207,12 +207,12 @@ public class PrintServiceTests
             return Task.FromResult(_processResult);
         }
 
-        protected override Task<(bool Success, string Message)> VerifySpoolerLifecycleAsync(
+        protected override Task<(bool Success, string Message, string? SpoolerJobId)> VerifySpoolerLifecycleAsync(
             string printerName,
             string expectedDocument,
             CancellationToken cancellationToken)
         {
-            return Task.FromResult(_verificationResult);
+            return Task.FromResult((_verificationResult.Success, _verificationResult.Message, (string?)null));
         }
 
         protected override (bool HasError, int ErrorCode, string Description) CheckPrinterErrorState(

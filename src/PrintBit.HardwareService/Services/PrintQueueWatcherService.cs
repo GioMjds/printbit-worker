@@ -43,14 +43,14 @@ public class PrintQueueWatcherService : BackgroundService
     protected override async Task ExecuteAsync(
         CancellationToken stoppingToken)
     {
-        var queueDirectory = _settings.PrintQueueDirectory;
-        var archiveDirectory =
+        var queueDirectory = Path.GetFullPath(_settings.PrintQueueDirectory);
+        var failedDirectory =
             Path.Combine(
                 Path.GetDirectoryName(queueDirectory) ?? AppContext.BaseDirectory,
-                "archive");
+                "failed");
 
         Directory.CreateDirectory(queueDirectory);
-        Directory.CreateDirectory(archiveDirectory);
+        Directory.CreateDirectory(failedDirectory);
 
         _logger.LogInformation(
             "Watching print queue: {path}",
@@ -78,9 +78,9 @@ public class PrintQueueWatcherService : BackgroundService
                         var pdfFile = Path.ChangeExtension(jsonFile, ".pdf");
                         if (!File.Exists(pdfFile))
                         {
-                            _logger.LogWarning("Found JSON sidecar {jsonFile} but missing PDF file. Archiving orphan.", jsonFile);
-                            var archiveOrphanPath = Path.Combine(archiveDirectory, Path.GetFileName(jsonFile));
-                            File.Move(jsonFile, archiveOrphanPath, true);
+                            _logger.LogWarning("Found JSON sidecar {jsonFile} but missing PDF file. Moving to failed.", jsonFile);
+                            var failedOrphanPath = Path.Combine(failedDirectory, Path.GetFileName(jsonFile));
+                            File.Move(jsonFile, failedOrphanPath, true);
                             continue;
                         }
 
@@ -136,19 +136,30 @@ public class PrintQueueWatcherService : BackgroundService
                                 SpoolerCorrelationKey = correlation.SpoolerCorrelationKey,
                                 FileName = fileName,
                                 PrinterName = _settings.PrinterName,
+                                SpoolerJobId = result.SpoolerJobId,
                                 FailureStage = result.Success ? null : result.FailureStage.ToString(),
                                 Message = result.Success ? "Print completed" : result.Message
                             },
                             stoppingToken,
                             connectTimeoutMilliseconds: NodeConnectTimeoutMs);
 
-                        var archivePdfPath = Path.Combine(archiveDirectory, Path.GetFileName(pdfFile));
-                        var archiveJsonPath = Path.Combine(archiveDirectory, Path.GetFileName(jsonFile));
+                        if (result.Success)
+                        {
+                            File.Delete(pdfFile);
+                            File.Delete(jsonFile);
 
-                        File.Move(pdfFile, archivePdfPath, true);
-                        File.Move(jsonFile, archiveJsonPath, true);
+                            _logger.LogInformation("Print succeeded; files deleted: {file}", fileName);
+                        }
+                        else
+                        {
+                            var failedPdfPath = Path.Combine(failedDirectory, Path.GetFileName(pdfFile));
+                            var failedJsonPath = Path.Combine(failedDirectory, Path.GetFileName(jsonFile));
 
-                        _logger.LogInformation("Files archived successfully");
+                            File.Move(pdfFile, failedPdfPath, true);
+                            File.Move(jsonFile, failedJsonPath, true);
+
+                            _logger.LogWarning("Print failed; files moved to failed directory: {file}", fileName);
+                        }
                     }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                     {
