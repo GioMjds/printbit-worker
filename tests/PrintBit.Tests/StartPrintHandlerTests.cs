@@ -20,7 +20,7 @@ public class StartPrintHandlerTests
             Result = new PrintJobResult
             {
                 Success = true,
-                ProcessSucceeded = true,
+                SumatraProcessSucceeded = true,
                 VerificationSucceeded = true,
                 Message = "verified"
             }

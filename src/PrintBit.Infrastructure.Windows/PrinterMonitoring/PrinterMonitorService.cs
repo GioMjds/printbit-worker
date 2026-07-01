@@ -12,12 +12,9 @@ namespace PrintBit.Infrastructure.Windows.PrinterMonitoring;
 [SupportedOSPlatform("windows")]
 public class PrinterMonitorService : BackgroundService
 {
-    // 3-second cold-start connect timeout. The default 500ms is too short
-    // when Node.js is still starting up alongside this worker.
-    private const int NodeConnectTimeoutMs = 3_000;
-
     private readonly ILogger<PrinterMonitorService> _logger;
     private readonly HardwareSettings _hardwareSettings;
+    private readonly IpcSettings _ipcSettings;
     private readonly WorkerEventPipeClient _eventPipe;
     private readonly IPrintHealthCoordinator _printHealthCoordinator;
 
@@ -33,11 +30,13 @@ public class PrinterMonitorService : BackgroundService
     public PrinterMonitorService(
         ILogger<PrinterMonitorService> logger,
         IOptions<HardwareSettings> hardwareOptions,
+        IOptions<IpcSettings> ipcOptions,
         WorkerEventPipeClient eventPipe,
         IPrintHealthCoordinator printHealthCoordinator)
     {
         _logger = logger;
         _hardwareSettings = hardwareOptions.Value;
+        _ipcSettings = ipcOptions.Value;
         _eventPipe = eventPipe;
         _printHealthCoordinator = printHealthCoordinator;
     }
@@ -69,7 +68,7 @@ public class PrinterMonitorService : BackgroundService
         using var searcher = new ManagementObjectSearcher(
             $"SELECT * FROM Win32_Printer WHERE Name = '{_hardwareSettings.PrinterName}'");
 
-        foreach (ManagementObject printer in searcher.Get())
+        foreach (ManagementObject printer in searcher.Get().Cast<ManagementObject>())
         {
             var isOffline = printer["WorkOffline"] is true;
             var status = printer["Status"];
@@ -137,7 +136,7 @@ public class PrinterMonitorService : BackgroundService
         // Best-effort drain of the latest pending event. If Node.js is
         // unreachable right now, the next poll cycle will retry.
         if (_pendingEvent is not null
-            && await _eventPipe.SendAsync(_pendingEvent, stoppingToken, NodeConnectTimeoutMs))
+            && await _eventPipe.SendAsync(_pendingEvent, stoppingToken))
         {
             _pendingEvent = null;
         }
@@ -165,7 +164,7 @@ public class PrinterMonitorService : BackgroundService
         using var searcher = new ManagementObjectSearcher(
             "SELECT * FROM Win32_PrintJob");
 
-        foreach (ManagementObject job in searcher.Get())
+        foreach (ManagementObject job in searcher.Get().Cast<ManagementObject>())
         {
             _logger.LogInformation(
                 "Print job | Name={name} Document={doc} Status={status}",

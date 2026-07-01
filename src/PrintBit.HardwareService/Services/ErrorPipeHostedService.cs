@@ -84,9 +84,14 @@ public sealed class ErrorPipeHostedService : BackgroundService
                             continue;
                         }
 
+                        // NodeErrorMessageParser.TryParse guarantees `message` is
+                        // non-null when it returns true (the MissingMessage path
+                        // nulls it and returns false). The `!` here is a hint to
+                        // the nullable-flow analyzer, which can't see across the
+                        // `continue` short-circuit above.
                         _logger.LogError(
                             "Node error | Source={source} Code={code} Message={message} TransactionId={transactionId} SpoolerCorrelationKey={spoolerKey} TimestampUtc={timestampUtc} Stack={stack}",
-                            message.Source ?? "unknown",
+                            message!.Source ?? "unknown",
                             message.Code ?? "unknown",
                             message.Message,
                             message.TransactionId,
@@ -102,7 +107,7 @@ public sealed class ErrorPipeHostedService : BackgroundService
                         "Node error pipe client disconnected");
                 }
             }
-            catch (UnauthorizedAccessException ex)
+            catch (UnauthorizedAccessException)
             {
                 _logger.LogWarning(
                     "Node error pipe at {pipe} is already in use. Retrying in 5 seconds...",

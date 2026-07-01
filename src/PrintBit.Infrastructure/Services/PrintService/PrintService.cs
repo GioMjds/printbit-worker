@@ -93,20 +93,13 @@ public class PrintService : IPrintService
 
             if (!verification.Success)
             {
-                var isHardwareError = verification.Message.StartsWith("Printer hardware error", StringComparison.Ordinal)
-                    || verification.Message.StartsWith("Print job error detected", StringComparison.Ordinal);
-
-                var failureStage = isHardwareError
-                    ? PrintFailureStage.HardwareError
-                    : PrintFailureStage.SpoolerVerification;
-
                 _logger.LogError(
                     "Print verification failed | Stage={stage} | Message={message}",
-                    failureStage,
+                    verification.Stage,
                     verification.Message);
 
                 return PrintJobResult.Failed(
-                    failureStage,
+                    verification.Stage,
                     verification.Message,
                     processResult.ExitCode,
                     verification.SpoolerJobId);
@@ -119,7 +112,7 @@ public class PrintService : IPrintService
             {
                 Success = true,
                 Message = "Print completed and verified successfully",
-                ProcessSucceeded = true,
+                SumatraProcessSucceeded = true,
                 VerificationSucceeded = true,
                 FailureStage = PrintFailureStage.None,
                 ExitCode = processResult.ExitCode,
@@ -171,6 +164,11 @@ public class PrintService : IPrintService
 
         try
         {
+            // Process.Start is synchronous and has no async wrapper. We accept
+            // the brief blocking here because Sumatra cold-start (15-30s) and
+            // the print timeout (120s) dominate the total time. A stuck Start
+            // call (e.g. AV scan) would still be caught by the timeout below
+            // because WaitForExitAsync reports exit once Start resolves.
             process.Start();
         }
         catch (Exception ex)
@@ -228,14 +226,14 @@ public class PrintService : IPrintService
         {
             Success = true,
             Message = "Print process exited successfully",
-            ProcessSucceeded = true,
+            SumatraProcessSucceeded = true,
             VerificationSucceeded = false,
             FailureStage = PrintFailureStage.None,
             ExitCode = process.ExitCode
         };
     }
 
-    protected virtual async Task<(bool Success, string Message, string? SpoolerJobId)> VerifySpoolerLifecycleAsync(
+    protected virtual async Task<SpoolerVerificationResult> VerifySpoolerLifecycleAsync(
         string printerName,
         string expectedDocument,
         CancellationToken cancellationToken)
@@ -266,28 +264,31 @@ public class PrintService : IPrintService
                 printerName,
                 expectedDocument);
 
+            // Pull JobId directly (uint) — avoids the localized "Name" format
+            // ("Printer, JobId" varies by locale and silently mismatches on
+            // non-US Windows).
             using var searcher = new ManagementObjectSearcher(
-                "SELECT * FROM Win32_PrintJob");
+                "SELECT Name, Document, JobStatus, JobId FROM Win32_PrintJob");
 
             var cancelledCount = 0;
-            foreach (ManagementObject job in searcher.Get())
+            foreach (ManagementObject job in searcher.Get().Cast<ManagementObject>())
             {
                 var jobName = job["Name"]?.ToString() ?? string.Empty;
                 var document = job["Document"]?.ToString() ?? string.Empty;
-                var separatorIndex = jobName.LastIndexOf(", ", StringComparison.Ordinal);
-                var jobPrinterName = separatorIndex >= 0 ? jobName[..separatorIndex] : jobName;
-                var jobId = separatorIndex >= 0 ? jobName[(separatorIndex + 2)..] : string.Empty;
+                var jobId = Convert.ToUInt32(job["JobId"] ?? 0u);
+                var spoolerJobIdInt = uint.TryParse(spoolerJobId, out var id) ? id : 0u;
 
-                if (string.Equals(jobPrinterName, printerName, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(jobId, spoolerJobId, StringComparison.Ordinal) &&
+                if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
+                    jobId == spoolerJobIdInt &&
                     document.Contains(expectedDocument, StringComparison.OrdinalIgnoreCase))
                 {
                     _logger.LogWarning(
-                        "Cancelling/Deleting stuck print job from Windows spooler: Name='{name}', Document='{doc}', JobStatus='{status}'",
+                        "Cancelling/Deleting stuck print job from Windows spooler: Name='{name}', Document='{doc}', JobId={jobId}, JobStatus='{status}'",
                         jobName,
                         document,
+                        jobId,
                         job["JobStatus"]);
-                    
+
                     job.Delete();
                     cancelledCount++;
                 }
@@ -308,11 +309,22 @@ public class PrintService : IPrintService
         }
     }
 
-    protected virtual async Task<(bool Success, string Message, string? SpoolerJobId)> VerifySpoolerLifecycleInternalAsync(
+    protected virtual async Task<SpoolerVerificationResult> VerifySpoolerLifecycleInternalAsync(
         string printerName,
         string expectedDocument,
         CancellationToken cancellationToken)
     {
+        // WMI searchers are leased for the lifetime of this verification attempt.
+        // Caching them avoids re-establishing the underlying IWbemServices
+        // connection on every loop iteration (up to ~57 iterations: 45s in the
+        // main loop + 12s post-clear guard). The PrintLock semaphore in
+        // PrintAsync already serializes the whole pipeline, so the cached
+        // searchers are not shared across attempts.
+        using var printerSearcher = new ManagementObjectSearcher(
+            $"SELECT DetectedErrorState FROM Win32_Printer WHERE Name = '{printerName}'");
+        using var jobSearcher = new ManagementObjectSearcher(
+            "SELECT Name, Document, StatusMask, JobStatus, JobId FROM Win32_PrintJob");
+
         var seenMatchingJob = false;
         string? lastSpoolerJobId = null;
         var deadline = DateTime.UtcNow.AddSeconds(VerificationTimeoutSeconds);
@@ -326,11 +338,30 @@ public class PrintService : IPrintService
                     "Printer hardware error signaled by monitor: {message} (code {code})",
                     signaledError.Message,
                     signaledError.ErrorCode);
-                return (false, $"Printer hardware error: {signaledError.Message} (code {signaledError.ErrorCode})", lastSpoolerJobId);
+                return new SpoolerVerificationResult(
+                    false,
+                    PrintFailureStage.HardwareError,
+                    $"Printer hardware error: {signaledError.Message} (code {signaledError.ErrorCode})",
+                    lastSpoolerJobId);
             }
 
             // ── Printer-level hardware error check ──────────────────────
-            var printerError = CheckPrinterErrorState(printerName);
+            //
+            // NOTE: this WMI call and the GetMatchingJobs call below are
+            // *not* a single WMI snapshot — there is a small window
+            // (5–15 ms) where the spooler can change state between them.
+            // We accept the race because:
+            //   1. PrinterMonitorService runs in parallel and reports fatal
+            //      hardware errors through IPrintHealthCoordinator
+            //      (checked at the top of this loop), so the second
+            //      error-channel is not lost.
+            //   2. A true atomic WMI snapshot across two different
+            //      classes (Win32_Printer, Win32_PrintJob) requires a
+            //      ManagementScope + ManagementObjectCollection snapshot
+            //      pattern that is fragile, error-prone, and
+            //      platform-version dependent. The cost/benefit does not
+            //      justify the complexity.
+            var printerError = CheckPrinterErrorState(printerName, printerSearcher);
 
             if (printerError.HasError)
             {
@@ -339,8 +370,11 @@ public class PrintService : IPrintService
                     printerError.Description,
                     printerError.ErrorCode);
 
-                return (false,
-                    $"Printer hardware error: {printerError.Description} (code {printerError.ErrorCode})", lastSpoolerJobId);
+                return new SpoolerVerificationResult(
+                    false,
+                    PrintFailureStage.HardwareError,
+                    $"Printer hardware error: {printerError.Description} (code {printerError.ErrorCode})",
+                    lastSpoolerJobId);
             }
 
             // ── Epson Status Monitor Popup Check ────────────────────────
@@ -367,20 +401,25 @@ public class PrintService : IPrintService
                     }
                 }
 
-                return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)", lastSpoolerJobId);
+                return new SpoolerVerificationResult(
+                    false,
+                    PrintFailureStage.HardwareError,
+                    "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)",
+                    lastSpoolerJobId);
             }
 
             // ── Job-level status check ───────────────────────────────────
             var matchingJobs = GetMatchingJobs(
                 printerName,
-                expectedDocument);
+                expectedDocument,
+                jobSearcher);
 
             if (matchingJobs.Count > 0)
             {
                 seenMatchingJob = true;
 
-                lastSpoolerJobId = matchingJobs[0].Name.Contains(", ")
-                    ? matchingJobs[0].Name.Split(", ")[^1]
+                lastSpoolerJobId = matchingJobs[0].JobId > 0
+                    ? matchingJobs[0].JobId.ToString()
                     : null;
 
                 foreach (var job in matchingJobs)
@@ -396,8 +435,11 @@ public class PrintService : IPrintService
                             job.StatusMask,
                             job.JobStatus);
 
-                        return (false,
-                            $"Print job error detected (StatusMask=0x{job.StatusMask:X}, JobStatus={job.JobStatus})", lastSpoolerJobId);
+                        return new SpoolerVerificationResult(
+                            false,
+                            PrintFailureStage.HardwareError,
+                            $"Print job error detected (StatusMask=0x{job.StatusMask:X}, JobStatus={job.JobStatus})",
+                            lastSpoolerJobId);
                     }
                 }
 
@@ -413,6 +455,10 @@ public class PrintService : IPrintService
 
                 for (int i = 0; i < PostClearGuardWindowSeconds; i++)
                 {
+                    // Check cancellation at the top of the iteration so the
+                    // guard exits immediately when the caller cancels, rather
+                    // than waiting up to a full second inside Task.Delay.
+                    cancellationToken.ThrowIfCancellationRequested();
                     await Task.Delay(1000, cancellationToken);
 
                     if (_printHealthCoordinator.TryGetFatalHardwareError(printerName, out var delayedSignal))
@@ -421,7 +467,11 @@ public class PrintService : IPrintService
                             "Fatal hardware error signaled during post-clear guard: {message} (code {code})",
                             delayedSignal.Message,
                             delayedSignal.ErrorCode);
-                        return (false, $"Printer hardware error: {delayedSignal.Message} (code {delayedSignal.ErrorCode})", lastSpoolerJobId);
+                        return new SpoolerVerificationResult(
+                            false,
+                            PrintFailureStage.HardwareError,
+                            $"Printer hardware error: {delayedSignal.Message} (code {delayedSignal.ErrorCode})",
+                            lastSpoolerJobId);
                     }
                     var finalPopup = CheckEpsonStatusMonitorPopup();
                     if (finalPopup.HasPopup)
@@ -442,12 +492,16 @@ public class PrintService : IPrintService
                             catch { }
                         }
 
-                        return (false, "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)", lastSpoolerJobId);
+                        return new SpoolerVerificationResult(
+                            false,
+                            PrintFailureStage.HardwareError,
+                            "Printer hardware error: Epson Status Monitor detected an issue (e.g., Paper Out)",
+                            lastSpoolerJobId);
                     }
                 }
 
                 // confirm the printer is still healthy before declaring success.
-                var finalCheck = CheckPrinterErrorState(printerName);
+                var finalCheck = CheckPrinterErrorState(printerName, printerSearcher);
 
                 if (finalCheck.HasError)
                 {
@@ -456,10 +510,18 @@ public class PrintService : IPrintService
                         finalCheck.Description,
                         finalCheck.ErrorCode);
 
-                    return (false, $"Printer hardware error: {finalCheck.Description} (code {finalCheck.ErrorCode})", lastSpoolerJobId);
+                    return new SpoolerVerificationResult(
+                        false,
+                        PrintFailureStage.HardwareError,
+                        $"Printer hardware error: {finalCheck.Description} (code {finalCheck.ErrorCode})",
+                        lastSpoolerJobId);
                 }
 
-                return (true, "Spooler lifecycle verified", lastSpoolerJobId);
+                return new SpoolerVerificationResult(
+                    true,
+                    PrintFailureStage.None,
+                    "Spooler lifecycle verified",
+                    lastSpoolerJobId);
             }
 
             await Task.Delay(
@@ -469,10 +531,18 @@ public class PrintService : IPrintService
 
         if (!seenMatchingJob)
         {
-            return (false, $"No spooler job observed for document '{expectedDocument}'", lastSpoolerJobId);
+            return new SpoolerVerificationResult(
+                false,
+                PrintFailureStage.SpoolerVerification,
+                $"No spooler job observed for document '{expectedDocument}'",
+                lastSpoolerJobId);
         }
 
-        return (false, $"Spooler job for '{expectedDocument}' did not clear before timeout", lastSpoolerJobId);
+        return new SpoolerVerificationResult(
+            false,
+            PrintFailureStage.SpoolerVerification,
+            $"Spooler job for '{expectedDocument}' did not clear before timeout",
+            lastSpoolerJobId);
     }
 
     /// <summary>
@@ -480,14 +550,12 @@ public class PrintService : IPrintService
     /// Codes ≥ 3 are treated as fatal hardware errors.
     /// </summary>
     protected virtual (bool HasError, int ErrorCode, string Description) CheckPrinterErrorState(
-        string printerName)
+        string printerName,
+        ManagementObjectSearcher searcher)
     {
         try
         {
-            using var searcher = new ManagementObjectSearcher(
-                $"SELECT DetectedErrorState FROM Win32_Printer WHERE Name = '{printerName}'");
-
-            foreach (ManagementObject printer in searcher.Get())
+            foreach (ManagementObject printer in TryQuery(searcher))
             {
                 var raw = printer["DetectedErrorState"];
 
@@ -537,22 +605,28 @@ public class PrintService : IPrintService
 
         var printSettingsArg = string.Join(",", settingsList);
 
-        return new Process
+        // Use ArgumentList (collection-based) instead of the legacy Arguments
+        // string. The OS handles quoting/escaping for each element, eliminating
+        // the shell-quoting attack surface that interpolation into a single
+        // Arguments string would expose for printer names or file paths that
+        // contain embedded quotes.
+        var startInfo = new ProcessStartInfo
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = sumatraPath,
-                Arguments =
-                    $"-print-to \"{request.PrinterName}\" " +
-                    $"-print-settings \"{printSettingsArg}\" " +
-                    $"-silent " +
-                    $"\"{request.FilePath}\"",
-                CreateNoWindow = true,
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true
-            }
+            FileName = sumatraPath,
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true
         };
+
+        startInfo.ArgumentList.Add("-print-to");
+        startInfo.ArgumentList.Add(request.PrinterName);
+        startInfo.ArgumentList.Add("-print-settings");
+        startInfo.ArgumentList.Add(printSettingsArg);
+        startInfo.ArgumentList.Add("-silent");
+        startInfo.ArgumentList.Add(request.FilePath);
+
+        return new Process { StartInfo = startInfo };
     }
 
     private void KillHungProcess(
@@ -583,31 +657,52 @@ public class PrintService : IPrintService
     /// </summary>
     private const int FatalErrorThreshold = 3;
 
-    private List<(string Name, string Document, uint StatusMask, string JobStatus)> GetMatchingJobs(
+    private List<(string Name, string Document, uint StatusMask, string JobStatus, uint JobId)> GetMatchingJobs(
         string printerName,
-        string expectedDocument)
+        string expectedDocument,
+        ManagementObjectSearcher searcher)
     {
-        var matches = new List<(string Name, string Document, uint StatusMask, string JobStatus)>();
+        var matches = new List<(string Name, string Document, uint StatusMask, string JobStatus, uint JobId)>();
 
-        using var searcher = new ManagementObjectSearcher(
-            "SELECT Name, Document, StatusMask, JobStatus FROM Win32_PrintJob");
-
-        foreach (ManagementObject job in searcher.Get())
+        foreach (ManagementObject job in TryQuery(searcher))
         {
             var jobName = job["Name"]?.ToString() ?? string.Empty;
             var document = job["Document"]?.ToString() ?? string.Empty;
 
-            if (jobName.Contains(printerName, StringComparison.OrdinalIgnoreCase) &&
+            if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
                 document.Contains(expectedDocument, StringComparison.OrdinalIgnoreCase))
             {
                 var statusMask = Convert.ToUInt32(job["StatusMask"] ?? 0u);
                 var jobStatus = job["JobStatus"]?.ToString() ?? string.Empty;
+                var jobId = Convert.ToUInt32(job["JobId"] ?? 0u);
 
-                matches.Add((jobName, document, statusMask, jobStatus));
+                matches.Add((jobName, document, statusMask, jobStatus, jobId));
             }
         }
 
         return matches;
+    }
+
+    /// <summary>
+    /// Runs the searcher's query and materializes the result. On a
+    /// stale-connection <see cref="ManagementException"/> (e.g. spooler
+    /// restart mid-print), returns an empty sequence so the verification
+    /// loop can degrade gracefully instead of crashing. The cached searcher
+    /// itself cannot be rebound in-place — System.Management constructs a
+    /// new IWbemServices binding on the next <c>Get()</c> call only if the
+    /// searcher was re-allocated, which we don't do here because the caller
+    /// owns the searcher lifetime.
+    /// </summary>
+    private static IEnumerable<ManagementObject> TryQuery(ManagementObjectSearcher searcher)
+    {
+        try
+        {
+            return searcher.Get().Cast<ManagementObject>().ToList();
+        }
+        catch (ManagementException)
+        {
+            return Array.Empty<ManagementObject>();
+        }
     }
 
     private static string DetectedErrorStateDescription(int code) => code switch
@@ -723,3 +818,16 @@ public class PrintService : IPrintService
         return (found, targetPid, foundTitle);
     }
 }
+
+/// <summary>
+/// Typed result of <see cref="PrintService.VerifySpoolerLifecycleInternalAsync"/>.
+/// The <see cref="Stage"/> field is the dispatch key — callers must use it
+/// (not message-string matching) to choose the failure stage. This replaces
+/// the previous (bool, string, string?) tuple, which forced string-prefix
+/// dispatch on the message and broke when the message copy changed.
+/// </summary>
+public record SpoolerVerificationResult(
+    bool Success,
+    PrintFailureStage Stage,
+    string Message,
+    string? SpoolerJobId);

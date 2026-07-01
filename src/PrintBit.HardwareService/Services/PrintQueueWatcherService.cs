@@ -8,11 +8,6 @@ namespace PrintBit.HardwareService.Services;
 
 public class PrintQueueWatcherService : BackgroundService
 {
-    // Mirrors PrinterMonitorService: the default 500ms connect
-    // timeout is too short when Node.js is still starting alongside
-    // the worker, so the first event of a session would be lost.
-    private const int NodeConnectTimeoutMs = 3_000;
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -69,6 +64,14 @@ public class PrintQueueWatcherService : BackgroundService
                         continue;
                     }
 
+                    // Foreign JSON in the queue directory (e.g. appsettings.json, project.assets.json)
+                    // must not be treated as a print job. Only files matching the
+                    // tx-<id>_spool-<id>_<ts>.json shape are real print sidecars.
+                    if (!IsPrintJobSidecar(jsonFile))
+                    {
+                        continue;
+                    }
+
                     _processingFiles.Add(jsonFile);
 
                     try
@@ -101,8 +104,7 @@ public class PrintQueueWatcherService : BackgroundService
                                 FileName = fileName,
                                 PrinterName = _settings.PrinterName
                             },
-                            stoppingToken,
-                            connectTimeoutMilliseconds: NodeConnectTimeoutMs);
+                            stoppingToken);
 
                         var result = await _printService.PrintAsync(
                             new PrintJobRequest
@@ -140,8 +142,7 @@ public class PrintQueueWatcherService : BackgroundService
                                 FailureStage = result.Success ? null : result.FailureStage.ToString(),
                                 Message = result.Success ? "Print completed" : result.Message
                             },
-                            stoppingToken,
-                            connectTimeoutMilliseconds: NodeConnectTimeoutMs);
+                            stoppingToken);
 
                         if (result.Success)
                         {
@@ -202,5 +203,17 @@ public class PrintQueueWatcherService : BackgroundService
         }
 
         return (parts[0], parts[1]);
+    }
+
+    private static bool IsPrintJobSidecar(string jsonFile)
+    {
+        var fileName = Path.GetFileName(jsonFile);
+
+        // Sidecar file is "tx-..._spool-..._...json". TryParseCorrelation returns
+        // a non-null pair only when the first two underscore-separated segments are
+        // non-empty, which is the contract we depend on.
+        var (transactionId, spoolKey) = TryParseCorrelation(fileName);
+
+        return transactionId is not null && spoolKey is not null;
     }
 }

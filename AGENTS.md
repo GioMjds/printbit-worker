@@ -215,7 +215,9 @@ Dependency direction:
 | `PrintHealthCoordinator` | Infrastructure | In-memory singleton coordinating fatal hardware signals between `PrinterMonitorService` and active `PrintService` attempts |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 
-Legacy ESP32/orchestrator classes remain in the codebase but are not wired in the printer-only runtime.
+Legacy ESP32/orchestrator classes were removed when the runtime committed to
+printer-only mode. The DI container hosts only the three printer-related services
+(`PrintQueueWatcherService`, `ErrorPipeHostedService`, `PrinterMonitorService`).
 
 ### DI Registration (Program.cs)
 
@@ -246,7 +248,6 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
   "HardwareSettings": {
     "Esp32Port": "COM3",
     "Esp32BaudRate": 115200,
-    "WatchdogIntervalSeconds": 5,
     "PrintTimeoutSeconds": 120,
     "PrinterName": "EPSON L5290 Series",
     "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue",

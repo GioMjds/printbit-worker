@@ -52,7 +52,7 @@ public class StartPrintHandler
                 },
                 cancellationToken);
 
-            if (result.ProcessSucceeded)
+            if (result.SumatraProcessSucceeded)
             {
                 _stateMachine.TryStartVerifying();
             }

@@ -44,7 +44,7 @@ internal sealed class FakePrintService : IPrintService
     public PrintJobResult Result { get; set; } = new()
     {
         Success = true,
-        ProcessSucceeded = true,
+        SumatraProcessSucceeded = true,
         VerificationSucceeded = true,
         Message = "ok"
     };

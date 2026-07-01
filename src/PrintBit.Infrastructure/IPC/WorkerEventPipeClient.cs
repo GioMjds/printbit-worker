@@ -10,8 +10,6 @@ namespace PrintBit.Infrastructure.IPC;
 
 public sealed class WorkerEventPipeClient
 {
-    private const int DefaultConnectTimeoutMilliseconds = 500;
-
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() }
@@ -33,12 +31,12 @@ public sealed class WorkerEventPipeClient
     /// Sends a newline-delimited JSON event to the worker return pipe.
     /// Returns true when the payload was written and flushed; false when
     /// the listener was unavailable (timeout, access denied, IO error).
-    /// Callers can keep the event and retry on a later call.
+    /// Callers can keep the event and retry on a later call. The connect
+    /// timeout is sourced from <see cref="IpcSettings.ConnectTimeoutMs"/>.
     /// </summary>
     public async Task<bool> SendAsync(
         WorkerPrintEvent evt,
-        CancellationToken cancellationToken = default,
-        int connectTimeoutMilliseconds = DefaultConnectTimeoutMilliseconds)
+        CancellationToken cancellationToken = default)
     {
         if (evt is null)
         {
@@ -53,7 +51,7 @@ public sealed class WorkerEventPipeClient
 
         try
         {
-            await client.ConnectAsync(connectTimeoutMilliseconds, cancellationToken);
+            await client.ConnectAsync(_settings.ConnectTimeoutMs, cancellationToken);
 
             var payload = JsonSerializer.Serialize(evt, JsonOptions) + "\n";
             var bytes = Encoding.UTF8.GetBytes(payload);

@@ -6,7 +6,7 @@ public class PrintJobResult
 
     public string Message { get; set; } = string.Empty;
 
-    public bool ProcessSucceeded { get; set; }
+    public bool SumatraProcessSucceeded { get; set; }
 
     public bool VerificationSucceeded { get; set; }
 
@@ -27,7 +27,7 @@ public class PrintJobResult
         return new PrintJobResult
         {
             Success = false,
-            ProcessSucceeded = stage is PrintFailureStage.SpoolerVerification
+            SumatraProcessSucceeded = stage is PrintFailureStage.SpoolerVerification
                                     or PrintFailureStage.HardwareError,
             VerificationSucceeded = false,
             FailureStage = stage,
