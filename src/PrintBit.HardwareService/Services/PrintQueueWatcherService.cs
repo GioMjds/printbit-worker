@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
+using PrintBit.Shared.Printing;
 
 namespace PrintBit.HardwareService.Services;
 
@@ -191,19 +192,13 @@ public class PrintQueueWatcherService : BackgroundService
         }
     }
 
+    // Parser lives in PrintBit.Shared so the WMI-based PrinterMonitorService
+    // (in PrintBit.Infrastructure.Windows) can share the same naming
+    // convention without a project reference back to this executable
+    // project. The local forwarder is kept for any external callers
+    // and to avoid touching the call sites above.
     public static (string? TransactionId, string? SpoolerCorrelationKey) TryParseCorrelation(
-        string fileName)
-    {
-        var baseName = Path.GetFileNameWithoutExtension(fileName);
-        var parts = baseName.Split('_', 3, StringSplitOptions.RemoveEmptyEntries);
-
-        if (parts.Length < 2)
-        {
-            return (null, null);
-        }
-
-        return (parts[0], parts[1]);
-    }
+        string fileName) => PrintJobFileName.TryParseCorrelation(fileName);
 
     private static bool IsPrintJobSidecar(string jsonFile)
     {

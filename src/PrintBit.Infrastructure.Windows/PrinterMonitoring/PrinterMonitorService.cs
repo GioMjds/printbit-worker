@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Management;
 using System.Runtime.Versioning;
 using Microsoft.Extensions.Hosting;
@@ -6,6 +7,7 @@ using Microsoft.Extensions.Options;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
+using PrintBit.Shared.Printing;
 
 namespace PrintBit.Infrastructure.Windows.PrinterMonitoring;
 
@@ -17,6 +19,15 @@ public class PrinterMonitorService : BackgroundService
     private readonly IpcSettings _ipcSettings;
     private readonly WorkerEventPipeClient _eventPipe;
     private readonly IPrintHealthCoordinator _printHealthCoordinator;
+
+    // Track last-seen (PagesPrinted, TotalPages) per spooler job id so we only
+    // emit a PrintProgress event when something has actually changed. The WMI
+    // poll runs every 2 s, so emitting unconditionally would flood the named
+    // pipe (one event every 2 s × N tracked jobs, even when no progress is
+    // being made). We also key by correlation key (parsed from the document
+    // filename) so the Node side can match the event to a lifecycle record
+    // without depending on the spooler's transient JobId.
+    private readonly Dictionary<uint, (int Pages, int Total)> _lastSeenPages = new();
 
     // Track last known state to avoid flooding the pipe with repeat events.
     private bool? _lastOfflineState = null;
@@ -52,11 +63,19 @@ public class PrinterMonitorService : BackgroundService
             try
             {
                 await MonitorPrinterStatusAsync(stoppingToken);
-                MonitorPrintJobs();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Printer monitoring failed");
+            }
+
+            try
+            {
+                await MonitorPrintJobsAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Print job monitoring failed");
             }
 
             await Task.Delay(2000, stoppingToken);
@@ -159,16 +178,109 @@ public class PrinterMonitorService : BackgroundService
         _ => $"Unknown Error ({code})"
     };
 
-    private void MonitorPrintJobs()
+    private async Task MonitorPrintJobsAsync(CancellationToken stoppingToken)
     {
         using var searcher = new ManagementObjectSearcher(
-            "SELECT * FROM Win32_PrintJob");
+            // Mirrors the SELECT used in PrintService.cs:326 but adds the
+            // page-count columns we need for progress reporting.
+            "SELECT Name, Document, StatusMask, JobStatus, JobId, PagesPrinted, TotalPages FROM Win32_PrintJob");
 
         foreach (ManagementObject job in searcher.Get().Cast<ManagementObject>())
         {
+            var jobName = job["Name"]?.ToString() ?? string.Empty;
+            var document = job["Document"]?.ToString() ?? string.Empty;
+            var jobStatus = job["JobStatus"]?.ToString() ?? string.Empty;
+            var jobId = Convert.ToUInt32(job["JobId"] ?? 0u);
+
             _logger.LogInformation(
                 "Print job | Name={name} Document={doc} Status={status}",
-                job["Name"], job["Document"], job["JobStatus"]);
+                jobName, document, jobStatus);
+
+            // Only emit progress for jobs that belong to the configured
+            // printer. PrintQueueWatcherService also enforces this on its
+            // side via Sumatra's job-naming, but the WMI query here is
+            // printer-wide so we filter defensively.
+            if (!jobName.StartsWith(_hardwareSettings.PrinterName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Parse the correlation key out of the document filename. The
+            // worker writes files as
+            //   {transactionId}_{spoolerCorrelationKey}_{timestamp}.pdf
+            // (see PrintBit.Shared.Printing.PrintJobFileName and
+            // worker-handoff.ts on the Node side). If the document doesn't
+            // match that shape (e.g. it was dispatched by some other
+            // process), skip — Node has no lifecycle record to attach this
+            // progress to and emitting a half-formed event would just
+            // confuse the receiver.
+            var (transactionId, spoolerCorrelationKey) =
+                PrintJobFileName.TryParseCorrelation(document);
+            if (transactionId is null || spoolerCorrelationKey is null)
+            {
+                continue;
+            }
+
+            // PagesPrinted and TotalPages are uint on WMI; coerce via
+            // Convert.ToInt32 which returns 0 on null. Filter 0/0 — that
+            // just means WMI hasn't latched onto the job yet, and emitting
+            // it would clobber Node's "I have no progress" state with a
+            // misleading "0 of 0".
+            var pagesPrinted = Convert.ToInt32(job["PagesPrinted"] ?? 0);
+            var totalPages = Convert.ToInt32(job["TotalPages"] ?? 0);
+            if (pagesPrinted == 0 && totalPages == 0)
+            {
+                continue;
+            }
+
+            // Dedup: only emit when the (pages, total) tuple changes. The
+            // spec calls for "whenever the PagesPrinted field changes for
+            // a tracked job", so a job that has finished or is between
+            // pages is silent. This keeps the pipe from being flooded
+            // while still emitting one event per page boundary.
+            if (_lastSeenPages.TryGetValue(jobId, out var prev)
+                && prev.Pages == pagesPrinted
+                && prev.Total == totalPages)
+            {
+                continue;
+            }
+            _lastSeenPages[jobId] = (pagesPrinted, totalPages);
+
+            // Replace any other pending event with this progress update —
+            // progress is the freshest signal we have. We deliberately
+            // overwrite a PrinterOffline/PrinterOnline pending event here
+            // because a paused-on-paper-out job that just resumed will
+            // emit both kinds of events in quick succession and Node only
+            // needs the freshest one.
+            _pendingEvent = new WorkerPrintEvent
+            {
+                Type = WorkerPrintEventType.PrintProgress,
+                TransactionId = transactionId,
+                SpoolerCorrelationKey = spoolerCorrelationKey,
+                SpoolerJobId = jobId.ToString(),
+                FileName = document,
+                PrinterName = _hardwareSettings.PrinterName,
+                PagesPrinted = pagesPrinted,
+                TotalPages = totalPages,
+                // Message is intentionally null — Node has dedicated
+                // fields for the page counts; a free-text message here
+                // would just be noise in the admin log.
+            };
+
+            _logger.LogInformation(
+                "Print progress | JobId={jobId} Document={doc} {pages}/{total}",
+                jobId, document, pagesPrinted, totalPages);
+        }
+
+        // Best-effort drain of the latest pending event (same pattern as
+        // MonitorPrinterStatusAsync). If Node is unreachable right now, the
+        // next poll cycle will retry. We await here so the loop in
+        // ExecuteAsync doesn't fire the next 2s timer while a send is
+        // still in flight.
+        if (_pendingEvent is not null
+            && await _eventPipe.SendAsync(_pendingEvent, stoppingToken))
+        {
+            _pendingEvent = null;
         }
     }
 }

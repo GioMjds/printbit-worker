@@ -473,21 +473,21 @@ public class PrintService : IPrintService
                             $"Printer hardware error: {delayedSignal.Message} (code {delayedSignal.ErrorCode})",
                             lastSpoolerJobId);
                     }
-                    var finalPopup = CheckEpsonStatusMonitorPopup();
-                    if (finalPopup.HasPopup)
+                    var (HasPopup, ProcessId, WindowTitle) = CheckEpsonStatusMonitorPopup();
+                    if (HasPopup)
                     {
                         _logger.LogError(
                             "Epson Status Monitor popup detected after job cleared ('{title}', PID {pid}).",
-                            finalPopup.WindowTitle,
-                            finalPopup.ProcessId);
+                            WindowTitle,
+                            ProcessId);
 
-                        if (finalPopup.ProcessId > 0)
+                        if (ProcessId > 0)
                         {
                             try
                             {
-                                var popupProcess = Process.GetProcessById(finalPopup.ProcessId);
+                                var popupProcess = Process.GetProcessById(ProcessId);
                                 popupProcess.Kill(true);
-                                _logger.LogInformation("Killed Epson Status Monitor process {pid} to unblock UI.", finalPopup.ProcessId);
+                                _logger.LogInformation("Killed Epson Status Monitor process {pid} to unblock UI.", ProcessId);
                             }
                             catch { }
                         }
@@ -501,19 +501,19 @@ public class PrintService : IPrintService
                 }
 
                 // confirm the printer is still healthy before declaring success.
-                var finalCheck = CheckPrinterErrorState(printerName, printerSearcher);
+                var (HasError, ErrorCode, Description) = CheckPrinterErrorState(printerName, printerSearcher);
 
-                if (finalCheck.HasError)
+                if (HasError)
                 {
                     _logger.LogError(
                         "Printer hardware error detected after job cleared: {description} (code {code})",
-                        finalCheck.Description,
-                        finalCheck.ErrorCode);
+                        Description,
+                        ErrorCode);
 
                     return new SpoolerVerificationResult(
                         false,
                         PrintFailureStage.HardwareError,
-                        $"Printer hardware error: {finalCheck.Description} (code {finalCheck.ErrorCode})",
+                        $"Printer hardware error: {Description} (code {ErrorCode})",
                         lastSpoolerJobId);
                 }
 
@@ -701,7 +701,7 @@ public class PrintService : IPrintService
         }
         catch (ManagementException)
         {
-            return Array.Empty<ManagementObject>();
+            return [];
         }
     }
 
@@ -740,14 +740,14 @@ public class PrintService : IPrintService
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
-    private static readonly string[] EpsonErrorKeywords = new[]
-    {
+    private static readonly string[] EpsonErrorKeywords =
+    [
         "paper out", "out of paper", "load paper", "no paper", "kehabisan kertas", "isi kertas",
         "paper jam", "jammed", "kertas macet", "jam",
         "service required", "service request",
         "ink out", "replace ink", "kehabisan tinta",
         "error", "fatal", "problem", "cannot print", "unable to print"
-    };
+    ];
 
     protected virtual (bool HasPopup, int ProcessId, string WindowTitle) CheckEpsonStatusMonitorPopup()
     {
@@ -757,12 +757,12 @@ public class PrintService : IPrintService
 
         try
         {
-            EnumWindows((hWnd, lParam) =>
+            _ = EnumWindows((hWnd, lParam) =>
             {
                 if (IsWindowVisible(hWnd))
                 {
                     var sb = new StringBuilder(256);
-                    GetWindowText(hWnd, sb, 256);
+                    _ = GetWindowText(hWnd, sb, 256);
                     string title = sb.ToString();
 
                     // Detect Epson Status Monitor window
@@ -771,7 +771,7 @@ public class PrintService : IPrintService
                         var windowTextBuilder = new StringBuilder();
                         windowTextBuilder.AppendLine(title);
 
-                        EnumChildWindows(hWnd, (childHwnd, childLParam) =>
+                        _ = EnumChildWindows(hWnd, (childHwnd, childLParam) =>
                         {
                             if (IsWindowVisible(childHwnd))
                             {
@@ -799,7 +799,7 @@ public class PrintService : IPrintService
 
                         if (isActualError)
                         {
-                            GetWindowThreadProcessId(hWnd, out uint pid);
+                            _ = GetWindowThreadProcessId(hWnd, out uint pid);
                             found = true;
                             targetPid = (int)pid;
                             foundTitle = title;

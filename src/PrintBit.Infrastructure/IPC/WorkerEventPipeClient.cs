@@ -38,10 +38,7 @@ public sealed class WorkerEventPipeClient
         WorkerPrintEvent evt,
         CancellationToken cancellationToken = default)
     {
-        if (evt is null)
-        {
-            throw new ArgumentNullException(nameof(evt));
-        }
+        ArgumentNullException.ThrowIfNull(evt);
 
         await using var client = new NamedPipeClientStream(
             ".",

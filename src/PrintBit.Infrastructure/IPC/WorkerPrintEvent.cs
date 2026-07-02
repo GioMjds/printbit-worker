@@ -19,4 +19,6 @@ public sealed record WorkerPrintEvent
     public string? Message { get; init; }
 
     public DateTime TimestampUtc { get; init; } = DateTime.UtcNow;
+    public int? PagesPrinted { get; init; }
+    public int? TotalPages { get; init; }
 }
