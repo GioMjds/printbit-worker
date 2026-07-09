@@ -6,10 +6,8 @@ namespace PrintBit.Infrastructure.Services.PrintService;
 
 public interface IJobOrchestrator
 {
-    Task ProcessJobAsync(
-        string pdfPath,
-        string transactionId,
-        string spoolerCorrelationKey,
-        int copies,
+    Task<PrintJobResult> ProcessJobAsync(
+        PrintJobRequest request,
+        string jsonFilePath,
         CancellationToken cancellationToken);
 }
