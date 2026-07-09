@@ -116,14 +116,23 @@ public class PagePrinter : IPagePrinter
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var (exists, statusMask, jobStatus, printed, total) = _healthMonitor.QueryJobStatus(printerName, documentName);
+            var (exists, statusMask, jobStatus, printed, total, jobId) = _healthMonitor.QueryJobStatus(printerName, documentName);
             if (exists)
             {
-                observedActive = true;
+                lastSpoolerJobId = jobId;
                 
                 // StatusMask: 0x2 (ERROR), 0x40 (PAPEROUT)
                 bool jobHasError = (statusMask & (0x2 | 0x40)) != 0;
                 bool fatalMonitorError = _healthMonitor.HasFatalHardwareError(printerName, out _, out var fatalMsg);
+
+                bool isPrinting = (statusMask & (0x10 | 0x80)) != 0 || 
+                                  jobStatus.Contains("Printing", StringComparison.OrdinalIgnoreCase) || 
+                                  jobStatus.Contains("Printed", StringComparison.OrdinalIgnoreCase);
+
+                if (isPrinting && !jobHasError)
+                {
+                    observedActive = true;
+                }
 
                 if (jobHasError || fatalMonitorError)
                 {

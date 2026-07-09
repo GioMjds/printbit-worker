@@ -163,7 +163,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         }
     }
 
-    public (bool JobExists, uint StatusMask, string JobStatus, int PagesPrinted, int TotalPages) QueryJobStatus(
+    public (bool JobExists, uint StatusMask, string JobStatus, int PagesPrinted, int TotalPages, string? JobId) QueryJobStatus(
         string printerName,
         string documentName)
     {
@@ -187,7 +187,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                         var status = job["JobStatus"]?.ToString() ?? string.Empty;
                         var printed = Convert.ToInt32(job["PagesPrinted"] ?? 0);
                         var total = Convert.ToInt32(job["TotalPages"] ?? 0);
-                        return (true, mask, status, printed, total);
+                        var jobId = Convert.ToUInt32(job["JobId"] ?? 0u).ToString();
+                        return (true, mask, status, printed, total, jobId);
                     }
                 }
                 finally
@@ -200,7 +201,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         {
             _logger.LogWarning(ex, "Failed to query print job status");
         }
-        return (false, 0, string.Empty, 0, 0);
+        return (false, 0, string.Empty, 0, 0, null);
     }
 
     public void CancelMatchingJobs(string printerName, string documentName, string? spoolerJobId)
