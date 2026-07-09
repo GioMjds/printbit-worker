@@ -65,26 +65,29 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         _eventPipe = eventPipe;
     }
 
-    public bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc)
+    public virtual bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc)
     {
         var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var status, out winSpoolDesc);
         winSpoolStatus = (int)status;
         var wsHealthy = winSpoolOk && ((status & WinSpoolApi.FATAL_STATUS_MASK) == 0);
         var wmiHealthy = IsWmiHealthy(printerName, out _);
-        var (hasPopup, _, _) = CheckEpsonStatusMonitorPopup();
+        var (hasPopup, _, _) = CheckEpsonStatusMonitorPopup(printerName);
 
         return wsHealthy && wmiHealthy && !hasPopup;
     }
 
     public bool HasFatalHardwareError(string printerName, out int errorCode, out string errorMessage)
     {
-        lock (_lock)
+        if (string.Equals(printerName, _hardwareSettings.PrinterName, StringComparison.OrdinalIgnoreCase))
         {
-            if (_fatalErrorCode != 0)
+            lock (_lock)
             {
-                errorCode = _fatalErrorCode;
-                errorMessage = _fatalErrorMessage;
-                return true;
+                if (_fatalErrorCode != 0)
+                {
+                    errorCode = _fatalErrorCode;
+                    errorMessage = _fatalErrorMessage;
+                    return true;
+                }
             }
         }
 
@@ -103,7 +106,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             return true;
         }
 
-        var (hasPopup, pid, title) = CheckEpsonStatusMonitorPopup();
+        var (hasPopup, pid, title) = CheckEpsonStatusMonitorPopup(printerName);
         if (hasPopup)
         {
             errorCode = 99;
@@ -169,19 +172,27 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             using var searcher = new ManagementObjectSearcher(
                 "SELECT Name, Document, StatusMask, JobStatus, JobId, PagesPrinted, TotalPages FROM Win32_PrintJob");
 
-            foreach (ManagementObject job in searcher.Get().Cast<ManagementObject>())
+            using var results = searcher.Get();
+            foreach (ManagementObject job in results.Cast<ManagementObject>())
             {
-                var jobName = job["Name"]?.ToString() ?? string.Empty;
-                var document = job["Document"]?.ToString() ?? string.Empty;
-
-                if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
-                    document.Contains(documentName, StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    var mask = Convert.ToUInt32(job["StatusMask"] ?? 0u);
-                    var status = job["JobStatus"]?.ToString() ?? string.Empty;
-                    var printed = Convert.ToInt32(job["PagesPrinted"] ?? 0);
-                    var total = Convert.ToInt32(job["TotalPages"] ?? 0);
-                    return (true, mask, status, printed, total);
+                    var jobName = job["Name"]?.ToString() ?? string.Empty;
+                    var document = job["Document"]?.ToString() ?? string.Empty;
+
+                    if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
+                        document.Contains(documentName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var mask = Convert.ToUInt32(job["StatusMask"] ?? 0u);
+                        var status = job["JobStatus"]?.ToString() ?? string.Empty;
+                        var printed = Convert.ToInt32(job["PagesPrinted"] ?? 0);
+                        var total = Convert.ToInt32(job["TotalPages"] ?? 0);
+                        return (true, mask, status, printed, total);
+                    }
+                }
+                finally
+                {
+                    job.Dispose();
                 }
             }
         }
@@ -199,17 +210,25 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             using var searcher = new ManagementObjectSearcher(
                 "SELECT Name, Document, JobStatus, JobId FROM Win32_PrintJob");
 
-            foreach (ManagementObject job in searcher.Get().Cast<ManagementObject>())
+            using var results = searcher.Get();
+            foreach (ManagementObject job in results.Cast<ManagementObject>())
             {
-                var jobName = job["Name"]?.ToString() ?? string.Empty;
-                var document = job["Document"]?.ToString() ?? string.Empty;
-                var jobId = Convert.ToUInt32(job["JobId"] ?? 0u).ToString();
-
-                if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
-                    (document.Contains(documentName, StringComparison.OrdinalIgnoreCase) || jobId == spoolerJobId))
+                try
                 {
-                    _logger.LogWarning("Deleting stuck print job {jobId}: {doc}", jobId, document);
-                    job.Delete();
+                    var jobName = job["Name"]?.ToString() ?? string.Empty;
+                    var document = job["Document"]?.ToString() ?? string.Empty;
+                    var jobId = Convert.ToUInt32(job["JobId"] ?? 0u).ToString();
+
+                    if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
+                        (document.Contains(documentName, StringComparison.OrdinalIgnoreCase) || jobId == spoolerJobId))
+                    {
+                        _logger.LogWarning("Deleting stuck print job {jobId}: {doc}", jobId, document);
+                        job.Delete();
+                    }
+                }
+                finally
+                {
+                    job.Dispose();
                 }
             }
         }
@@ -239,51 +258,60 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
     private async Task MonitorPrinterAsync(CancellationToken stoppingToken)
     {
+        var escapedPrinterName = _hardwareSettings.PrinterName.Replace("'", "''");
         using var searcher = new ManagementObjectSearcher(
-            $"SELECT DetectedErrorState, WorkOffline FROM Win32_Printer WHERE Name = '{_hardwareSettings.PrinterName}'");
+            $"SELECT DetectedErrorState, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
 
-        foreach (ManagementObject printer in searcher.Get().Cast<ManagementObject>())
+        using var results = searcher.Get();
+        foreach (ManagementObject printer in results.Cast<ManagementObject>())
         {
-            var isOffline = printer["WorkOffline"] is true;
-            var errorStateRaw = printer["DetectedErrorState"]?.ToString() ?? "0";
-            var errorCode = int.TryParse(errorStateRaw, out var c) ? c : 0;
-
-            if (_lastOfflineState != isOffline)
+            try
             {
-                _lastOfflineState = isOffline;
-                _pendingEvent = new WorkerPrintEvent
-                {
-                    Type = isOffline ? WorkerPrintEventType.PrinterOffline : WorkerPrintEventType.PrinterOnline,
-                    PrinterName = _hardwareSettings.PrinterName,
-                    Message = isOffline ? "Printer offline" : "Printer back online"
-                };
-            }
+                var isOffline = printer["WorkOffline"] is true;
+                var errorStateRaw = printer["DetectedErrorState"]?.ToString() ?? "0";
+                var errorCode = int.TryParse(errorStateRaw, out var c) ? c : 0;
 
-            lock (_lock)
-            {
-                if (errorCode >= 3)
+                if (_lastOfflineState != isOffline)
                 {
-                    _fatalErrorCode = errorCode;
-                    _fatalErrorMessage = DetectedErrorStateDescription(errorCode);
-
-                    if (_lastErrorState != errorStateRaw)
+                    _lastOfflineState = isOffline;
+                    _pendingEvent = new WorkerPrintEvent
                     {
-                        _lastErrorState = errorStateRaw;
-                        _pendingEvent = new WorkerPrintEvent
+                        Type = isOffline ? WorkerPrintEventType.PrinterOffline : WorkerPrintEventType.PrinterOnline,
+                        PrinterName = _hardwareSettings.PrinterName,
+                        Message = isOffline ? "Printer offline" : "Printer back online"
+                    };
+                }
+
+                lock (_lock)
+                {
+                    if (errorCode >= 3)
+                    {
+                        _fatalErrorCode = errorCode;
+                        _fatalErrorMessage = DetectedErrorStateDescription(errorCode);
+
+                        if (_lastErrorState != errorStateRaw)
                         {
-                            Type = WorkerPrintEventType.PrinterError,
-                            PrinterName = _hardwareSettings.PrinterName,
-                            FailureStage = "hardware_error",
-                            Message = $"Printer error ({_fatalErrorMessage})"
-                        };
+                            _lastErrorState = errorStateRaw;
+                            _pendingEvent = new WorkerPrintEvent
+                            {
+                                Type = WorkerPrintEventType.PrinterError,
+                                PrinterName = _hardwareSettings.PrinterName,
+                                FailureStage = "hardware_error",
+                                Message = $"Printer error ({_fatalErrorMessage})"
+                            };
+                        }
+                    }
+                    else
+                    {
+                        _fatalErrorCode = 0;
+                        _fatalErrorMessage = string.Empty;
+                        _lastErrorState = null;
                     }
                 }
-                else
-                {
-                    _fatalErrorCode = 0;
-                    _fatalErrorMessage = string.Empty;
-                    _lastErrorState = null;
-                }
+            }
+            finally
+            {
+                printer.Dispose();
             }
         }
 
@@ -298,21 +326,30 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         wmiDesc = "OK";
         try
         {
+            var escapedPrinterName = printerName.Replace("'", "''");
             using var searcher = new ManagementObjectSearcher(
-                $"SELECT DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{printerName}'");
+                $"SELECT DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
             
-            foreach (ManagementObject printer in searcher.Get().Cast<ManagementObject>())
+            using var results = searcher.Get();
+            foreach (ManagementObject printer in results.Cast<ManagementObject>())
             {
-                if (printer["WorkOffline"] is true)
+                try
                 {
-                    wmiDesc = "Offline";
-                    return false;
+                    if (printer["WorkOffline"] is true)
+                    {
+                        wmiDesc = "Offline";
+                        return false;
+                    }
+                    var err = Convert.ToInt32(printer["DetectedErrorState"] ?? 0);
+                    if (err >= 3)
+                    {
+                        wmiDesc = $"Error {err} ({DetectedErrorStateDescription(err)})";
+                        return false;
+                    }
                 }
-                var err = Convert.ToInt32(printer["DetectedErrorState"] ?? 0);
-                if (err >= 3)
+                finally
                 {
-                    wmiDesc = $"Error {err} ({DetectedErrorStateDescription(err)})";
-                    return false;
+                    printer.Dispose();
                 }
             }
         }
@@ -337,7 +374,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         _ => $"Unknown Error ({code})"
     };
 
-    private (bool HasPopup, int ProcessId, string WindowTitle) CheckEpsonStatusMonitorPopup()
+    private (bool HasPopup, int ProcessId, string WindowTitle) CheckEpsonStatusMonitorPopup(string printerName)
     {
         bool found = false;
         int targetPid = 0;
@@ -377,11 +414,24 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
                         if (isError)
                         {
-                            _ = GetWindowThreadProcessId(hWnd, out uint pid);
-                            found = true;
-                            targetPid = (int)pid;
-                            foundTitle = title;
-                            return false;
+                            var printerParts = printerName.Split(new[] { ' ', '-', '_' }, StringSplitOptions.RemoveEmptyEntries)
+                                .Where(part => !string.Equals(part, "Series", StringComparison.OrdinalIgnoreCase) &&
+                                               !string.Equals(part, "Printer", StringComparison.OrdinalIgnoreCase) &&
+                                               !string.Equals(part, "Epson", StringComparison.OrdinalIgnoreCase))
+                                .ToList();
+
+                            bool nameMatches = printerParts.Count > 0
+                                ? printerParts.Any(part => fullContent.Contains(part, StringComparison.OrdinalIgnoreCase))
+                                : fullContent.Contains(printerName, StringComparison.OrdinalIgnoreCase);
+
+                            if (nameMatches)
+                            {
+                                _ = GetWindowThreadProcessId(hWnd, out uint pid);
+                                found = true;
+                                targetPid = (int)pid;
+                                foundTitle = title;
+                                return false;
+                            }
                         }
                     }
                 }
@@ -397,18 +447,48 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
     private void KillProcess(string name)
     {
-        foreach (var p in Process.GetProcessesByName(name))
+        var processes = Process.GetProcessesByName(name);
+        foreach (var p in processes)
         {
-            try { p.Kill(true); } catch { }
+            using (p)
+            {
+                try { p.Kill(true); } catch { }
+            }
         }
     }
 
     private async Task RestartSpoolerAsync()
     {
-        using var stop = Process.Start(new ProcessStartInfo { FileName = "cmd.exe", Arguments = "/c net stop spooler", CreateNoWindow = true, UseShellExecute = false });
-        if (stop is not null) await stop.WaitForExitAsync();
+        using var stop = Process.Start(new ProcessStartInfo 
+        { 
+            FileName = "cmd.exe", 
+            Arguments = "/c net stop spooler", 
+            CreateNoWindow = true, 
+            UseShellExecute = false 
+        });
+        if (stop is not null)
+        {
+            await stop.WaitForExitAsync();
+            if (stop.ExitCode != 0)
+            {
+                _logger.LogWarning("Failed to stop spooler service (exit code: {ExitCode}). Make sure the service is running with Administrative privileges.", stop.ExitCode);
+            }
+        }
         await Task.Delay(2000);
-        using var start = Process.Start(new ProcessStartInfo { FileName = "cmd.exe", Arguments = "/c net start spooler", CreateNoWindow = true, UseShellExecute = false });
-        if (start is not null) await start.WaitForExitAsync();
+        using var start = Process.Start(new ProcessStartInfo 
+        { 
+            FileName = "cmd.exe", 
+            Arguments = "/c net start spooler", 
+            CreateNoWindow = true, 
+            UseShellExecute = false 
+        });
+        if (start is not null)
+        {
+            await start.WaitForExitAsync();
+            if (start.ExitCode != 0)
+            {
+                _logger.LogWarning("Failed to start spooler service (exit code: {ExitCode}). Make sure the service is running with Administrative privileges.", start.ExitCode);
+            }
+        }
     }
 }

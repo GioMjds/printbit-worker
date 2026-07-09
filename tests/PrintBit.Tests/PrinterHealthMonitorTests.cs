@@ -1,6 +1,10 @@
 using Xunit;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
+using PrintBit.Infrastructure.Windows.PrinterMonitoring;
+using PrintBit.Shared.Configurations;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -8,20 +12,79 @@ namespace PrintBit.Tests;
 
 public class PrinterHealthMonitorTests
 {
+    private class TestablePrinterHealthMonitor : PrinterHealthMonitor
+    {
+        public bool MockHealthy { get; set; } = true;
+        public int MockWinSpoolStatus { get; set; } = 0;
+        public string MockWinSpoolDesc { get; set; } = "OK";
+        public int IsHealthyCallCount { get; set; } = 0;
+
+        public TestablePrinterHealthMonitor(
+            IOptions<HardwareSettings> hardwareOptions,
+            WorkerEventPipeClient eventPipe)
+            : base(
+                NullLogger<PrinterHealthMonitor>.Instance,
+                hardwareOptions,
+                eventPipe)
+        {
+        }
+
+        public override bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc)
+        {
+            IsHealthyCallCount++;
+            winSpoolStatus = MockWinSpoolStatus;
+            winSpoolDesc = MockWinSpoolDesc;
+            return MockHealthy;
+        }
+    }
+
     [Fact]
     public async Task WaitForPrinterHealthyAsync_StopsOnCancellation()
     {
-        var monitorMock = new Mock<IPrinterHealthMonitor>();
-        monitorMock.Setup(m => m.WaitForPrinterHealthyAsync(
-            It.IsAny<string>(),
-            It.IsAny<int>(),
-            It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
+        var settings = new HardwareSettings { PrinterName = "TestPrinter" };
+        var ipcSettings = new IpcSettings { WorkerReturnPipeName = "test-pipe" };
+        
+        var eventPipe = new WorkerEventPipeClient(
+            NullLogger<WorkerEventPipeClient>.Instance,
+            Options.Create(ipcSettings));
+
+        var monitor = new TestablePrinterHealthMonitor(
+            Options.Create(settings),
+            eventPipe)
+        {
+            MockHealthy = false
+        };
 
         using var cts = new CancellationTokenSource();
+        // Cancel immediately
         cts.Cancel();
 
-        var result = await monitorMock.Object.WaitForPrinterHealthyAsync("Printer", 30, cts.Token);
+        // Pass 30 seconds timeout, but cancel immediately via token
+        var result = await monitor.WaitForPrinterHealthyAsync("TestPrinter", 30, cts.Token);
+        
         Assert.False(result);
+    }
+
+    [Fact]
+    public async Task WaitForPrinterHealthyAsync_ReturnsTrueIfHealthy()
+    {
+        var settings = new HardwareSettings { PrinterName = "TestPrinter" };
+        var ipcSettings = new IpcSettings { WorkerReturnPipeName = "test-pipe" };
+
+        var eventPipe = new WorkerEventPipeClient(
+            NullLogger<WorkerEventPipeClient>.Instance,
+            Options.Create(ipcSettings));
+
+        var monitor = new TestablePrinterHealthMonitor(
+            Options.Create(settings),
+            eventPipe)
+        {
+            MockHealthy = true
+        };
+
+        var result = await monitor.WaitForPrinterHealthyAsync("TestPrinter", 30, CancellationToken.None);
+
+        Assert.True(result);
+        Assert.Equal(1, monitor.IsHealthyCallCount);
     }
 }
