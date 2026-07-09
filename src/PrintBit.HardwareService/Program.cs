@@ -12,15 +12,14 @@ builder.Services.Configure<IpcSettings>(builder.Configuration.GetSection("IpcSet
 
 builder.Services.AddHostedService<ErrorPipeHostedService>();
 
-builder.Services.AddHostedService<PrintQueueWatcherService>();
+// Registrations for the new page-level spooler dispatch model
+builder.Services.AddSingleton<PrinterHealthMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PrinterHealthMonitor>());
+builder.Services.AddSingleton<IPrinterHealthMonitor>(sp => sp.GetRequiredService<PrinterHealthMonitor>());
 
-builder.Services.AddHostedService<PrinterMonitorService>();
-
-builder.Services.AddSingleton<IPrintService, PrintService>();
-
-builder.Services.AddSingleton<IPrintRecoveryService, PrintRecoveryService>();
-
-builder.Services.AddSingleton<IPrintHealthCoordinator, PrintHealthCoordinator>();
+builder.Services.AddSingleton<IPagePrinter, PagePrinter>();
+builder.Services.AddSingleton<IJobOrchestrator, JobOrchestrator>();
+builder.Services.AddHostedService<PrintQueueWatcher>();
 
 builder.Services.AddSingleton<WorkerEventPipeClient>();
 
