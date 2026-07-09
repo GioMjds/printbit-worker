@@ -170,10 +170,18 @@ public class PagePrinter : IPagePrinter
                     return new PagePrintResult { State = PagePrintState.Completed };
                 }
                 
-                // Job was never observed
+                if (lastSpoolerJobId != null)
+                {
+                    // Job was previously seen in the spooler, but vanished without ever being observed active/printing.
+                    // This represents a cancellation (e.g. user pressed Stop ✖ which deleted it from the queue).
+                    _logger.LogWarning("Spooler job {jobId} vanished without being observed active; treating as cancelled", lastSpoolerJobId);
+                    return new PagePrintResult { State = PagePrintState.Cancelled, ErrorMessage = "Spooler job vanished without printing; likely cancelled by user" };
+                }
+                
+                // Job was never observed in the spooler queue at all
                 if (_healthMonitor.IsHealthy(printerName, out _, out _))
                 {
-                    // Treated as printed fast
+                    // Treated as printed fast (i.e. printed and cleared before the first poll)
                     return new PagePrintResult { State = PagePrintState.Completed };
                 }
             }
