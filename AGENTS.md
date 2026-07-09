@@ -221,6 +221,7 @@ Dependency direction:
 | `PrintHealthCoordinator` | Infrastructure | In-memory singleton coordinating fatal hardware signals between `PrinterMonitorService` and active `PrintService` attempts |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 | `PrinterHealthMonitor` | Infrastructure.Windows | Unified implementation of printer health checks, Epson popup monitor, and spooler recovery/wait routines |
+| `JobOrchestrator` | Infrastructure | Orchestrates page-level print sequencing, PDF splitting via qpdf, pre-flight checks, and event emission |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
 printer-only mode. The DI container hosts only the three printer-related services
