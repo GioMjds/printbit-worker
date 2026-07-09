@@ -23,9 +23,9 @@ public class HardwareSettings
     // can locate retried jobs.
     public string? FailedDirectory { get; set; }
 
-    public string SumatraPath { get; set; } = @"C:\Users\Admin\Desktop\printbit\bin\SumatraPDF.exe";
+    public string SumatraPath { get; set; } = @"C:\Users\printbit\bin\SumatraPDF.exe";
 
-    public string QpdfPath { get; set; } = @"C:\Users\Admin\Desktop\printbit\bin\qpdf.exe";
+    public string QpdfPath { get; set; } = @"C:\Users\printbit\bin\qpdf.exe";
 
     public int PdfSplitTimeoutSeconds { get; set; } = 30;
 

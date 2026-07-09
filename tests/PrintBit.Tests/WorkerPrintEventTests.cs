@@ -62,16 +62,12 @@ public class WorkerPrintEventTests
     [Fact]
     public void HardwareSettings_HasNewConfigFields()
     {
-        var settings = new HardwareSettings
-        {
-            QpdfPath = @"C:\bin\qpdf.exe",
-            PdfSplitTimeoutSeconds = 45,
-            PauseTimeoutMinutes = 10
-        };
+        var settings = new HardwareSettings();
 
-        Assert.Equal(@"C:\bin\qpdf.exe", settings.QpdfPath);
-        Assert.Equal(45, settings.PdfSplitTimeoutSeconds);
-        Assert.Equal(10, settings.PauseTimeoutMinutes);
+        Assert.Equal(@"C:\Users\printbit\bin\SumatraPDF.exe", settings.SumatraPath);
+        Assert.Equal(@"C:\Users\printbit\bin\qpdf.exe", settings.QpdfPath);
+        Assert.Equal(30, settings.PdfSplitTimeoutSeconds);
+        Assert.Equal(15, settings.PauseTimeoutMinutes);
     }
 
     [Fact]
