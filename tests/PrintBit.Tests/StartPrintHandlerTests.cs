@@ -15,7 +15,7 @@ public class StartPrintHandlerTests
     public async Task VerifiedPrintResult_MarksSuccess()
     {
         var stateMachine = CreateReadyStateMachine();
-        var printService = new FakePrintService
+        var printService = new StartPrintFakePrintService()
         {
             Result = new PrintJobResult
             {
@@ -37,7 +37,7 @@ public class StartPrintHandlerTests
     public async Task FailedPrintResult_MarksFailed()
     {
         var stateMachine = CreateReadyStateMachine();
-        var printService = new FakePrintService
+        var printService = new StartPrintFakePrintService()
         {
             Result = PrintJobResult.Failed(
                 PrintFailureStage.SpoolerVerification,
@@ -56,7 +56,7 @@ public class StartPrintHandlerTests
     public async Task Exception_MarksFailed()
     {
         var stateMachine = CreateReadyStateMachine();
-        var printService = new FakePrintService
+        var printService = new StartPrintFakePrintService()
         {
             ThrowOnPrint = true
         };
@@ -88,5 +88,20 @@ public class StartPrintHandlerTests
         stateMachine.TryInsertCoin(5);
 
         return stateMachine;
+    }
+}
+
+public class StartPrintFakePrintService : IPrintService
+{
+    public PrintJobResult? Result { get; set; }
+    public bool ThrowOnPrint { get; set; }
+
+    public Task<PrintJobResult> PrintAsync(PrintJobRequest request, CancellationToken cancellationToken = default)
+    {
+        if (ThrowOnPrint)
+        {
+            throw new Exception("Unhandled print exception");
+        }
+        return Task.FromResult(Result ?? new PrintJobResult { Success = true });
     }
 }

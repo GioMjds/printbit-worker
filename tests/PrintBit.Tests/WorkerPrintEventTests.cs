@@ -14,7 +14,7 @@ public class WorkerPrintEventTests
     {
         var fileName = "tx-1_spool-1_1700000000000.pdf";
 
-        var parsed = PrintQueueWatcherService.TryParseCorrelation(fileName);
+        var parsed = PrintJobFileName.TryParseCorrelation(fileName);
 
         Assert.Equal("tx-1", parsed.TransactionId);
         Assert.Equal("spool-1", parsed.SpoolerCorrelationKey);
@@ -23,7 +23,7 @@ public class WorkerPrintEventTests
     [Fact]
     public void TryParseCorrelation_WithMissingParts_ReturnsNulls()
     {
-        var parsed = PrintQueueWatcherService.TryParseCorrelation("justfile.pdf");
+        var parsed = PrintJobFileName.TryParseCorrelation("justfile.pdf");
 
         Assert.Null(parsed.TransactionId);
         Assert.Null(parsed.SpoolerCorrelationKey);
