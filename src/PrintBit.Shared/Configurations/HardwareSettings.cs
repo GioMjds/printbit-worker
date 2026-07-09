@@ -16,5 +16,18 @@ public class HardwareSettings
     // appsettings.Development.json for environment-specific paths.
     public string PrintQueueDirectory { get; set; } = "queue";
 
-    public string SumatraPath { get; set; } = @"C:\Users\printbit\bin\SumatraPDF.exe";
+    // Directory the watcher moves failed PDF/JSON sidecars into after a print
+    // attempt fails. When null/empty, the watcher falls back to a "failed"
+    // sibling of the resolved PrintQueueDirectory. Must match
+    // PRINTBIT_WORKER_FAILED_DIR on the Node side so the Node orchestrator
+    // can locate retried jobs.
+    public string? FailedDirectory { get; set; }
+
+    public string SumatraPath { get; set; } = @"C:\Users\Admin\Desktop\printbit\bin\SumatraPDF.exe";
+
+    public string QpdfPath { get; set; } = @"C:\Users\Admin\Desktop\printbit\bin\qpdf.exe";
+
+    public int PdfSplitTimeoutSeconds { get; set; } = 30;
+
+    public int PauseTimeoutMinutes { get; set; } = 15;
 }

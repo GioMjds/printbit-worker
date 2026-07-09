@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using PrintBit.HardwareService.Services;
 using PrintBit.Infrastructure.IPC;
+using PrintBit.Shared.Configurations;
+using PrintBit.Shared.Printing;
 
 namespace PrintBit.Tests;
 
@@ -55,5 +57,52 @@ public class WorkerPrintEventTests
         Assert.StartsWith("Printer hardware error detected (code 2).", doc.RootElement.GetProperty("message").GetString());
         // TimestampUtc defaults to DateTime.UtcNow, so just assert it is an ISO-8601 string.
         Assert.Matches(@"^\d{4}-\d{2}-\d{2}T", doc.RootElement.GetProperty("timestampUtc").GetString());
+    }
+
+    [Fact]
+    public void HardwareSettings_HasNewConfigFields()
+    {
+        var settings = new HardwareSettings
+        {
+            QpdfPath = @"C:\bin\qpdf.exe",
+            PdfSplitTimeoutSeconds = 45,
+            PauseTimeoutMinutes = 10
+        };
+
+        Assert.Equal(@"C:\bin\qpdf.exe", settings.QpdfPath);
+        Assert.Equal(45, settings.PdfSplitTimeoutSeconds);
+        Assert.Equal(10, settings.PauseTimeoutMinutes);
+    }
+
+    [Fact]
+    public void WorkerPrintEvent_SerializesToCamelCase()
+    {
+        var evt = new WorkerPrintEvent
+        {
+            Type = WorkerPrintEventType.JobCompleted,
+            TransactionId = "TX-1",
+            SpoolerCorrelationKey = "SCK-1",
+            Outcome = "partially_completed",
+            TotalCopies = 2,
+            TotalExpected = 4,
+            CancelledCount = 1,
+            CompletedCount = 3,
+            Pages = new System.Collections.Generic.List<WorkerPrintPageResult>
+            {
+                new() { Page = 1, Copy = 1, State = "completed" },
+                new() { Page = 2, Copy = 1, State = "cancelled" }
+            }
+        };
+
+        var json = JsonSerializer.Serialize(evt, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+        });
+
+        Assert.Contains("\"type\":\"JobCompleted\"", json);
+        Assert.Contains("\"transactionId\":\"TX-1\"", json);
+        Assert.Contains("\"outcome\":\"partially_completed\"", json);
+        Assert.Contains("\"pages\":[", json);
+        Assert.Contains("\"state\":\"completed\"", json);
     }
 }
