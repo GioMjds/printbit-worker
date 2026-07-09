@@ -76,9 +76,13 @@ public class PagePrinter : IPagePrinter
             {
                 await process.WaitForExitAsync(linkedCts.Token);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
                 try { process.Kill(true); } catch { }
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
                 await _healthMonitor.RecoverAsync(cancellationToken);
                 return new PagePrintResult { State = PagePrintState.Failed, FailureStage = PrintFailureStage.Timeout, ErrorMessage = "Sumatra process timeout" };
             }
@@ -112,81 +116,93 @@ public class PagePrinter : IPagePrinter
         bool observedActive = false;
         string? lastSpoolerJobId = null;
 
-        while (DateTime.UtcNow < deadline || (inPatienceMode && DateTime.UtcNow < patienceDeadline))
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var (exists, statusMask, jobStatus, printed, total, jobId) = _healthMonitor.QueryJobStatus(printerName, documentName);
-            if (exists)
+            while (DateTime.UtcNow < deadline || (inPatienceMode && DateTime.UtcNow < patienceDeadline))
             {
-                lastSpoolerJobId = jobId;
-                
-                // StatusMask: 0x2 (ERROR), 0x40 (PAPEROUT)
-                bool jobHasError = (statusMask & (0x2 | 0x40)) != 0;
-                bool fatalMonitorError = _healthMonitor.HasFatalHardwareError(printerName, out _, out var fatalMsg);
+                cancellationToken.ThrowIfCancellationRequested();
 
-                bool isPrinting = (statusMask & (0x10 | 0x80)) != 0 || 
-                                  jobStatus.Contains("Printing", StringComparison.OrdinalIgnoreCase) || 
-                                  jobStatus.Contains("Printed", StringComparison.OrdinalIgnoreCase);
-
-                if (isPrinting && !jobHasError)
+                var (exists, statusMask, jobStatus, printed, total, jobId) = _healthMonitor.QueryJobStatus(printerName, documentName);
+                if (exists)
                 {
-                    observedActive = true;
-                }
+                    lastSpoolerJobId = jobId;
+                    
+                    // StatusMask: 0x2 (ERROR), 0x40 (PAPEROUT)
+                    bool jobHasError = (statusMask & (0x2 | 0x40)) != 0;
+                    bool fatalMonitorError = _healthMonitor.HasFatalHardwareError(printerName, out _, out var fatalMsg);
+                    bool isDeleting = (statusMask & (0x4 | 0x100)) != 0 || jobStatus.Contains("Deleting", StringComparison.OrdinalIgnoreCase);
 
-                if (jobHasError || fatalMonitorError)
-                {
-                    if (!inPatienceMode)
+                    // If seen in a normal progress state (no error, not deleting), it is considered active/printing
+                    bool isNormalProgress = !jobHasError && !isDeleting;
+
+                    if (isNormalProgress)
                     {
-                        inPatienceMode = true;
-                        var errorMsg = fatalMonitorError ? fatalMsg : $"Spooler error status: {jobStatus} (0x{statusMask:X})";
-                        onPaused(errorMsg);
+                        observedActive = true;
+                    }
+
+                    if (jobHasError || fatalMonitorError)
+                    {
+                        if (!inPatienceMode)
+                        {
+                            inPatienceMode = true;
+                            var errorMsg = fatalMonitorError ? fatalMsg : $"Spooler error status: {jobStatus} (0x{statusMask:X})";
+                            onPaused(errorMsg);
+                        }
+                    }
+                    else
+                    {
+                        if (inPatienceMode)
+                        {
+                            inPatienceMode = false;
+                            onResumed();
+                            deadline = DateTime.UtcNow.AddSeconds(45); // reset normal verification timeout
+                        }
                     }
                 }
                 else
                 {
-                    if (inPatienceMode)
+                    // Job cleared / not found
+                    if (observedActive)
                     {
-                        inPatienceMode = false;
-                        onResumed();
-                        deadline = DateTime.UtcNow.AddSeconds(45); // reset normal verification timeout
+                        // If we previously saw it, and it completed successfully, it transitions through printed
+                        // We run a post-clear hardware guard window
+                        _logger.LogInformation("Job cleared from spooler; running post-clear hardware guard window");
+                        await Task.Delay(TimeSpan.FromSeconds(_settings.PostClearGuardDelaySeconds), cancellationToken);
+
+                        if (_healthMonitor.HasFatalHardwareError(printerName, out var code, out var msg))
+                        {
+                            return new PagePrintResult { State = PagePrintState.Failed, FailureStage = PrintFailureStage.HardwareError, ErrorMessage = $"Post-clear hardware error code {code}: {msg}" };
+                        }
+                        return new PagePrintResult { State = PagePrintState.Completed };
+                    }
+                    
+                    if (lastSpoolerJobId != null)
+                    {
+                        // Job was previously seen in the spooler, but vanished without ever being observed active/printing.
+                        // This represents a cancellation (e.g. user pressed Stop ✖ which deleted it from the queue).
+                        _logger.LogWarning("Spooler job {jobId} vanished without being observed active; treating as cancelled", lastSpoolerJobId);
+                        return new PagePrintResult { State = PagePrintState.Cancelled, ErrorMessage = "Spooler job vanished without printing; likely cancelled by user" };
+                    }
+                    
+                    // Job was never observed in the spooler queue at all
+                    if (_healthMonitor.IsHealthy(printerName, out _, out _))
+                    {
+                        // Treated as printed fast (i.e. printed and cleared before the first poll)
+                        return new PagePrintResult { State = PagePrintState.Completed };
                     }
                 }
+
+                await Task.Delay(2000, cancellationToken);
             }
-            else
+        }
+        catch (OperationCanceledException)
+        {
+            if (lastSpoolerJobId != null || observedActive)
             {
-                // Job cleared / not found
-                if (observedActive)
-                {
-                    // If we previously saw it, and it completed successfully, it transitions through printed
-                    // We run a 12s post-clear guard window
-                    _logger.LogInformation("Job cleared from spooler; running post-clear hardware guard window");
-                    await Task.Delay(12000, cancellationToken);
-
-                    if (_healthMonitor.HasFatalHardwareError(printerName, out var code, out var msg))
-                    {
-                        return new PagePrintResult { State = PagePrintState.Failed, FailureStage = PrintFailureStage.HardwareError, ErrorMessage = $"Post-clear hardware error code {code}: {msg}" };
-                    }
-                    return new PagePrintResult { State = PagePrintState.Completed };
-                }
-                
-                if (lastSpoolerJobId != null)
-                {
-                    // Job was previously seen in the spooler, but vanished without ever being observed active/printing.
-                    // This represents a cancellation (e.g. user pressed Stop ✖ which deleted it from the queue).
-                    _logger.LogWarning("Spooler job {jobId} vanished without being observed active; treating as cancelled", lastSpoolerJobId);
-                    return new PagePrintResult { State = PagePrintState.Cancelled, ErrorMessage = "Spooler job vanished without printing; likely cancelled by user" };
-                }
-                
-                // Job was never observed in the spooler queue at all
-                if (_healthMonitor.IsHealthy(printerName, out _, out _))
-                {
-                    // Treated as printed fast (i.e. printed and cleared before the first poll)
-                    return new PagePrintResult { State = PagePrintState.Completed };
-                }
+                _logger.LogWarning("Spooler verification cancelled. Cancelling matching print jobs.");
+                _healthMonitor.CancelMatchingJobs(printerName, documentName, lastSpoolerJobId);
             }
-
-            await Task.Delay(2000, cancellationToken);
+            throw;
         }
 
         if (inPatienceMode)

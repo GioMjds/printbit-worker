@@ -79,7 +79,7 @@ public class PagePrinterTests
             healthMock.Setup(h => h.IsHealthy(It.IsAny<string>(), out winSpoolStatus, out winSpoolDesc))
                       .Returns(true);
 
-            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5 };
+            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5, PostClearGuardDelaySeconds = 0 };
             var sut = new PagePrinter(
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<PagePrinter>.Instance,
                 Microsoft.Extensions.Options.Options.Create(settings),
@@ -128,7 +128,7 @@ public class PagePrinterTests
             healthMock.Setup(h => h.HasFatalHardwareError(It.IsAny<string>(), out errorCode, out errorMessage))
                       .Returns(false);
 
-            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5 };
+            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5, PostClearGuardDelaySeconds = 0 };
             var sut = new PagePrinter(
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<PagePrinter>.Instance,
                 Microsoft.Extensions.Options.Options.Create(settings),
@@ -173,7 +173,7 @@ public class PagePrinterTests
                           return (false, 0u, "", 0, 0, null);
                       });
 
-            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5 };
+            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5, PostClearGuardDelaySeconds = 0 };
             var sut = new PagePrinter(
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<PagePrinter>.Instance,
                 Microsoft.Extensions.Options.Options.Create(settings),
@@ -222,7 +222,7 @@ public class PagePrinterTests
             healthMock.Setup(h => h.HasFatalHardwareError(It.IsAny<string>(), out errorCode, out errorMessage))
                       .Returns(true);
 
-            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5 };
+            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5, PostClearGuardDelaySeconds = 0 };
             var sut = new PagePrinter(
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<PagePrinter>.Instance,
                 Microsoft.Extensions.Options.Options.Create(settings),

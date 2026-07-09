@@ -28,6 +28,6 @@ public class HardwareSettings
     public string QpdfPath { get; set; } = @"C:\Users\printbit\bin\qpdf.exe";
 
     public int PdfSplitTimeoutSeconds { get; set; } = 30;
-
     public int PauseTimeoutMinutes { get; set; } = 15;
+    public int PostClearGuardDelaySeconds { get; set; } = 12;
 }
