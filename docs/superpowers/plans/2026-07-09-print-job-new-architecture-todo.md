@@ -5,5 +5,5 @@
 - [x] Task 3: Implement Single-Page Printer
 - [x] Task 4: Implement Job Orchestrator
 - [x] Task 5: Implement Slimmed-Down Queue Watcher and Setup Hosted Services
-- [ ] Task 6: Remove Obsolete Code Files
-- [ ] Task 7: Execute Global Verification Suite
+- [x] Task 6: Remove Obsolete Code Files
+- [x] Task 7: Execute Global Verification Suite
