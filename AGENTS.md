@@ -220,6 +220,7 @@ Dependency direction:
 | `PrintService` | Infrastructure | Sumatra process + spooler verification (incl. `StatusMask` and `DetectedErrorState` hardware error checks), 12-second post-clear hardware guard, and print lock |
 | `PrintHealthCoordinator` | Infrastructure | In-memory singleton coordinating fatal hardware signals between `PrinterMonitorService` and active `PrintService` attempts |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
+| `PrinterHealthMonitor` | Infrastructure.Windows | Unified implementation of printer health checks, Epson popup monitor, and spooler recovery/wait routines |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
 printer-only mode. The DI container hosts only the three printer-related services
