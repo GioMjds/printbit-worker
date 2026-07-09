@@ -119,14 +119,20 @@ Critical constraints:
 - `SumatraPDF.exe` path comes from `HardwareSettings.SumatraPath` (default `C:\Users\printbit\bin\SumatraPDF.exe`).
 - Printer name comes from `HardwareSettings.PrinterName` and must exactly match Windows registration.
 - Print jobs are serialized via `SemaphoreSlim(1, 1)`.
+- Before dispatching Sumatra, the print job blocks on `WaitForPrinterHealthyAsync` (up to 30 seconds), polling the printer health via the WinSpool API and WMI. If the printer is in a latched hardware error state (like paper-out), it performs a soft-reset via `SetPrinter` (PRINTER_CONTROL_SET_STATUS) and toggles a no-op print job to nudge the driver to clear the latched state.
+- After health recovery, a final pre-flight check using the WinSpool API is executed. If the printer is still unhealthy, the print is failed fast with `PrintFailureStage.HardwareError`.
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
 - Spooler verification inspects `Win32_PrintJob.StatusMask` for `ERROR` (`0x2`) and `PAPEROUT` (`0x40`) flags, and checks `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3: Low Paper, No Paper, Low Toner, No Toner, Door Open, Jammed, Offline, Service Requested, Output Bin Full).
+- Spooler verification also reads `Win32_PrintJob.PagesPrinted` vs `TotalPages`. If `PagesPrinted < TotalPages` for `IncompleteOutputStallSeconds` (3 s default), the job is failed with `PrintFailureStage.IncompleteOutput` (paper-out, jam, tray-empty, partial print). This is the primary signal that catches the "Status=Printed but page never came out" race.
+- The expected page count is computed up front by `PdfPageCounter` (parses the PDF's `/Type /Pages /Count` entry, no NuGet dep). If the count is unknown, verification falls back to the spooler's `TotalPages` only.
 - After a spooler job clears, `PrintService` keeps a 12-second post-clear hardware guard window to catch delayed Epson popup / monitor hardware signals before returning success.
+- Page counts from WMI are unreliable and can lag behind job completion. If the job has cleared and the printer is completely healthy, the print is treated as a success even if the last polled page count was less than expected, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated or aborted job).
 - `PrinterMonitorService` now treats `DetectedErrorState` as fatal only when code ≥ 3 and publishes those fatal signals through `IPrintHealthCoordinator` for in-flight print attempts.
 - Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
 - Any process or verification failure returns `Success = false` with stage detail.
 - When verification fails, any matching print jobs in the Windows spooler queue are automatically cancelled/deleted via WMI to clear the printer's hardware queue and prevent subsequent jobs from being blocked.
+- `PrintQueueWatcherService` performs a 1-second post-success WMI re-verify before deleting queue files. If a matching job is still in the spooler with `PagesPrinted < TotalPages`, the success is downgraded to `PrintFailureStage.IncompleteOutput` and the files are moved to `failed/`. This catches the rare race where the verification loop's 12 s guard concludes the job has cleared but the spooler parks it back into a paper-out state within ~1 s.
 
 ### Named Pipe (Node Error Intake)
 
@@ -251,7 +257,11 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "PrintTimeoutSeconds": 120,
     "PrinterName": "EPSON L5290 Series",
     "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue",
-    "SumatraPath": "C:\\Users\\printbit\\bin\\SumatraPDF.exe"
+    "FailedDirectory": "C:\\Users\\printbit\\printbit-worker\\failed",
+    "SumatraPath": "C:\\Users\\printbit\\bin\\SumatraPDF.exe",
+    "QpdfPath": "C:\\Users\\printbit\\bin\\qpdf.exe",
+    "PdfSplitTimeoutSeconds": 30,
+    "PauseTimeoutMinutes": 15
   },
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
@@ -315,7 +325,7 @@ Reset() from any state -> Idle
 - Add values to `Esp32MessageType` and update parser/docs.
 - Add `Esp32Command` constants and update docs.
 - Extend active non-stub classes.
-- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, and print verification behavior.
+- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, print verification behavior, and printer pre-flight/recovery status checking.
 - Add new `IOptions<T>` config models in `PrintBit.Shared`.
 - Extend `HardwareSettings` and sync docs.
 
@@ -410,6 +420,8 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - Spooler verification checks `Win32_PrintJob.StatusMask` for error/paperout flags and `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3). Hardware errors return `PrintFailureStage.HardwareError` without triggering recovery.
 - Upon any spooler verification failure, matching print jobs are programmatically cancelled from the Windows spooler queue (via WMI) to ensure the printer queue remains clean.
 - `PrintService` enforces a 12-second post-clear guard window before success to detect delayed Epson popup/hardware faults.
+- If the spooler job clears and the printer is completely healthy (no error reported via WMI, Epson popups, or direct WinSpool checks), the print is treated as a success regardless of WMI page count reporting lag, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated/aborted job).
+- Before print dispatch, `PrintService` invokes `WaitForPrinterHealthyAsync` to poll (and nudge using WinSpool commands and no-op jobs) the printer to clear any latched hardware states like W-01 (paper-out). It then performs a pre-flight WinSpool check to fail-fast with `HardwareError` if the printer remains unhealthy.
 - `PrinterMonitorService` reports only fatal `DetectedErrorState` codes (≥ 3) to Node.js as `PrinterError` and to in-flight print attempts via `IPrintHealthCoordinator`.
 - Queue watcher print requests go directly to `PrintService` (no transaction gate).
 
