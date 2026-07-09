@@ -53,8 +53,8 @@ public class PagePrinterTests
             "nonexistent.pdf",
             "PrinterName",
             0,
-            _ => {},
-            () => {},
+            _ => Task.CompletedTask,
+            () => Task.CompletedTask,
             CancellationToken.None);
 
         Assert.Equal(PagePrintState.Failed, result.State);
@@ -89,8 +89,8 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
-                _ => {},
-                () => {},
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
                 CancellationToken.None);
 
             Assert.Equal(PagePrintState.Completed, result.State);
@@ -138,8 +138,8 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
-                _ => {},
-                () => {},
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
                 CancellationToken.None);
 
             Assert.Equal(PagePrintState.Completed, result.State);
@@ -183,8 +183,8 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
-                _ => {},
-                () => {},
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
                 CancellationToken.None);
 
             Assert.Equal(PagePrintState.Cancelled, result.State);
@@ -232,8 +232,8 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
-                _ => {},
-                () => {},
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
                 CancellationToken.None);
 
             Assert.Equal(PagePrintState.Failed, result.State);

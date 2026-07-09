@@ -31,8 +31,8 @@ public class PagePrinter : IPagePrinter
         string filePath,
         string printerName,
         int sequenceIndex,
-        Action<string> onPaused,
-        Action onResumed,
+        Func<string, Task> onPaused,
+        Func<Task> onResumed,
         CancellationToken cancellationToken)
     {
         await PrintLock.WaitAsync(cancellationToken);
@@ -105,8 +105,8 @@ public class PagePrinter : IPagePrinter
     private async Task<PagePrintResult> VerifySpoolerPageLifecycleAsync(
         string printerName,
         string documentName,
-        Action<string> onPaused,
-        Action onResumed,
+        Func<string, Task> onPaused,
+        Func<Task> onResumed,
         CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow.AddSeconds(45);
@@ -146,7 +146,7 @@ public class PagePrinter : IPagePrinter
                         {
                             inPatienceMode = true;
                             var errorMsg = fatalMonitorError ? fatalMsg : $"Spooler error status: {jobStatus} (0x{statusMask:X})";
-                            onPaused(errorMsg);
+                            await onPaused(errorMsg);
                         }
                     }
                     else
@@ -154,7 +154,7 @@ public class PagePrinter : IPagePrinter
                         if (inPatienceMode)
                         {
                             inPatienceMode = false;
-                            onResumed();
+                            await onResumed();
                             deadline = DateTime.UtcNow.AddSeconds(45); // reset normal verification timeout
                         }
                     }

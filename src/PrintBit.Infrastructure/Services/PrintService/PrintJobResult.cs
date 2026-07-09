@@ -18,22 +18,36 @@ public class PrintJobResult
 
     public string? SpoolerPrinterName { get; set; }
 
+    // Last-seen page counts from Win32_PrintJob. Populated by the verification
+    // loop and forwarded to Node so it can distinguish "1 of 2 printed
+    // (paper out)" from "2 of 2 printed". Null when the spooler never
+    // reported page counts (job never appeared in the queue, or
+    // TotalPages was 0 the whole time).
+    public int? PagesPrinted { get; set; }
+
+    public int? TotalPages { get; set; }
+
     public static PrintJobResult Failed(
         PrintFailureStage stage,
         string message,
         int? exitCode = null,
-        string? spoolerJobId = null)
+        string? spoolerJobId = null,
+        int? pagesPrinted = null,
+        int? totalPages = null)
     {
         return new PrintJobResult
         {
             Success = false,
             SumatraProcessSucceeded = stage is PrintFailureStage.SpoolerVerification
-                                    or PrintFailureStage.HardwareError,
+                                    or PrintFailureStage.HardwareError
+                                    or PrintFailureStage.IncompleteOutput,
             VerificationSucceeded = false,
             FailureStage = stage,
             Message = message,
             ExitCode = exitCode,
-            SpoolerJobId = spoolerJobId
+            SpoolerJobId = spoolerJobId,
+            PagesPrinted = pagesPrinted,
+            TotalPages = totalPages
         };
     }
 }
