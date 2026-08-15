@@ -52,7 +52,10 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
     private static readonly string[] EpsonErrorKeywords = 
     {
-        "out of paper", "jam", "ink out", "no ink", "door open", "cover open", "offline", "error", "service"
+        "out of paper", "paper out", "paper is out", "no paper", "paper empty", "rear paper",
+        "feed paper", "load paper", "set paper", "load plain", "load a4", "empty",
+        "w-01", "w-02", "w-03", "w-04", "w-05", "jam", "ink out", "no ink",
+        "door open", "cover open", "offline", "error", "service"
     };
 
     public PrinterHealthMonitor(
@@ -70,10 +73,17 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var status, out winSpoolDesc);
         winSpoolStatus = (int)status;
         var wsHealthy = winSpoolOk && ((status & WinSpoolApi.FATAL_STATUS_MASK) == 0);
-        var wmiHealthy = IsWmiHealthy(printerName, out _);
-        var (hasPopup, _, _) = CheckEpsonStatusMonitorPopup(printerName);
+        var wmiHealthy = IsWmiHealthy(printerName, out var wmiDesc);
+        var (hasPopup, popupPid, popupTitle) = CheckEpsonStatusMonitorPopup(printerName);
 
-        return wsHealthy && wmiHealthy && !hasPopup;
+        bool healthy = wsHealthy && wmiHealthy && !hasPopup;
+        if (!healthy)
+        {
+            _logger.LogWarning("IsHealthy FALSE for '{printer}': wsHealthy={ws} (status 0x{status:X} - {winSpoolDesc}), wmiHealthy={wmi} ({wmiDesc}), hasPopup={popup} (PID {popupPid} - '{popupTitle}')",
+                printerName, wsHealthy, status, winSpoolDesc, wmiHealthy, wmiDesc, hasPopup, popupPid, popupTitle);
+        }
+
+        return healthy;
     }
 
     public bool HasFatalHardwareError(string printerName, out int errorCode, out string errorMessage)
@@ -99,6 +109,13 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             return true;
         }
 
+        var (jobExists, jobMask, jobStatusStr, _, _, _) = QueryJobStatus(printerName, string.Empty);
+        if (jobExists && ((jobMask & (0x2 | 0x40 | 0x20)) != 0 || jobStatusStr.Contains("Error", StringComparison.OrdinalIgnoreCase) || jobStatusStr.Contains("Paper", StringComparison.OrdinalIgnoreCase)))
+        {
+            errorCode = (int)jobMask;
+            errorMessage = $"Spooler job error: {jobStatusStr} (0x{jobMask:X})";
+            return true;
+        }
         if (!IsWmiHealthy(printerName, out var wmiDesc))
         {
             errorCode = 3;
@@ -180,8 +197,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                     var jobName = job["Name"]?.ToString() ?? string.Empty;
                     var document = job["Document"]?.ToString() ?? string.Empty;
 
-                    if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
-                        document.Contains(documentName, StringComparison.OrdinalIgnoreCase))
+                    // Match any print job assigned to this printer name
+                    if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase))
                     {
                         var mask = Convert.ToUInt32(job["StatusMask"] ?? 0u);
                         var status = job["JobStatus"]?.ToString() ?? string.Empty;
@@ -239,6 +256,53 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         }
     }
 
+    public void PauseMatchingJobs(string printerName, string documentName, string? spoolerJobId) =>
+        ControlMatchingJobs(printerName, documentName, spoolerJobId, WinSpoolApi.JOB_CONTROL_PAUSE, "Pausing");
+
+    public void ResumeMatchingJobs(string printerName, string documentName, string? spoolerJobId) =>
+        ControlMatchingJobs(printerName, documentName, spoolerJobId, WinSpoolApi.JOB_CONTROL_RESUME, "Resuming");
+
+    // Shared pause/resume driver. Mirrors CancelMatchingJobs' WMI job matching
+    // (by printer-prefixed Name + document substring, or explicit JobId) but
+    // issues a WinSpool SetJob control command instead of deleting the job.
+    // Best-effort: swallows all failures so the between-pages dispatch hold
+    // remains the guaranteed mechanism.
+    private void ControlMatchingJobs(string printerName, string documentName, string? spoolerJobId, int command, string verb)
+    {
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT Name, Document, JobStatus, JobId FROM Win32_PrintJob");
+
+            using var results = searcher.Get();
+            foreach (ManagementObject job in results.Cast<ManagementObject>())
+            {
+                try
+                {
+                    var jobName = job["Name"]?.ToString() ?? string.Empty;
+                    var document = job["Document"]?.ToString() ?? string.Empty;
+                    var jobIdRaw = Convert.ToUInt32(job["JobId"] ?? 0u);
+                    var jobId = jobIdRaw.ToString();
+
+                    if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
+                        (document.Contains(documentName, StringComparison.OrdinalIgnoreCase) || jobId == spoolerJobId))
+                    {
+                        _logger.LogInformation("{verb} spooler job {jobId}: {doc}", verb, jobId, document);
+                        _ = WinSpoolApi.ControlJob(printerName, (int)jobIdRaw, command);
+                    }
+                }
+                finally
+                {
+                    job.Dispose();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to {verb} print job (best-effort)", verb.ToLowerInvariant());
+        }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Unified Printer Monitor loop started for {printer}", _hardwareSettings.PrinterName);
@@ -285,7 +349,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
                 lock (_lock)
                 {
-                    if (errorCode >= 3)
+                    if (IsFatalDetectedErrorState(errorCode))
                     {
                         _fatalErrorCode = errorCode;
                         _fatalErrorMessage = DetectedErrorStateDescription(errorCode);
@@ -329,7 +393,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         {
             var escapedPrinterName = printerName.Replace("'", "''");
             using var searcher = new ManagementObjectSearcher(
-                $"SELECT DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
+                $"SELECT PrinterState, PrinterStatus, DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
             
             using var results = searcher.Get();
             foreach (ManagementObject printer in results.Cast<ManagementObject>())
@@ -341,8 +405,16 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                         wmiDesc = "Offline";
                         return false;
                     }
+
+                    var pState = Convert.ToUInt32(printer["PrinterState"] ?? 0u);
+                    if ((pState & WinSpoolApi.FATAL_STATUS_MASK) != 0)
+                    {
+                        wmiDesc = $"PrinterState 0x{pState:X} ({WinSpoolApi.GetStatusDescription(pState)})";
+                        return false;
+                    }
+
                     var err = Convert.ToInt32(printer["DetectedErrorState"] ?? 0);
-                    if (err >= 3)
+                    if (IsFatalDetectedErrorState(err))
                     {
                         wmiDesc = $"Error {err} ({DetectedErrorStateDescription(err)})";
                         return false;
@@ -358,8 +430,39 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         {
             // best effort
         }
+
         return true;
     }
+
+    private static uint GetRegistryPrinterStatus(string printerName)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                $@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Printers\{printerName}");
+            if (key != null)
+            {
+                var val = key.GetValue("Status");
+                if (val != null)
+                {
+                    return Convert.ToUInt32(val);
+                }
+            }
+        }
+        catch
+        {
+            // best effort
+        }
+        return 0;
+    }
+
+    private static bool IsFatalDetectedErrorState(int code) => code switch
+    {
+        3 => false, // Low Paper (Warning only, non-fatal)
+        5 => false, // Low Toner (Warning only, non-fatal)
+        4 or 6 or 7 or 8 or 9 or 10 or 11 => true,
+        _ => false
+    };
 
     private static string DetectedErrorStateDescription(int code) => code switch
     {
@@ -391,7 +494,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                     _ = GetWindowText(hWnd, sb, 256);
                     string title = sb.ToString();
 
-                    if (title.StartsWith("EPSON Status Monitor 3", StringComparison.OrdinalIgnoreCase))
+                    if (title.Contains("Status Monitor", StringComparison.OrdinalIgnoreCase) ||
+                        title.Contains("EPSON", StringComparison.OrdinalIgnoreCase))
                     {
                         var textBuilder = new StringBuilder();
                         textBuilder.AppendLine(title);
@@ -415,24 +519,11 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
                         if (isError)
                         {
-                            var printerParts = printerName.Split(new[] { ' ', '-', '_' }, StringSplitOptions.RemoveEmptyEntries)
-                                .Where(part => !string.Equals(part, "Series", StringComparison.OrdinalIgnoreCase) &&
-                                               !string.Equals(part, "Printer", StringComparison.OrdinalIgnoreCase) &&
-                                               !string.Equals(part, "Epson", StringComparison.OrdinalIgnoreCase))
-                                .ToList();
-
-                            bool nameMatches = printerParts.Count > 0
-                                ? printerParts.Any(part => fullContent.Contains(part, StringComparison.OrdinalIgnoreCase))
-                                : fullContent.Contains(printerName, StringComparison.OrdinalIgnoreCase);
-
-                            if (nameMatches)
-                            {
-                                _ = GetWindowThreadProcessId(hWnd, out uint pid);
-                                found = true;
-                                targetPid = (int)pid;
-                                foundTitle = title;
-                                return false;
-                            }
+                            _ = GetWindowThreadProcessId(hWnd, out uint pid);
+                            found = true;
+                            targetPid = (int)pid;
+                            foundTitle = title;
+                            return false;
                         }
                     }
                 }
@@ -444,6 +535,70 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             // ignored
         }
         return (found, targetPid, foundTitle);
+    }
+
+    public async Task DismissAndResetAsync(string printerName, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("[Resume] Dismissing EPSON Status Monitor popup and resetting printer error state.");
+
+        // 1. Target detected popup process ID directly if visible
+        var (hasPopup, popupPid, popupTitle) = CheckEpsonStatusMonitorPopup(printerName);
+        if (hasPopup && popupPid > 0)
+        {
+            _logger.LogInformation("[Resume] Found popup process PID {pid} ('{title}'). Terminating...", popupPid, popupTitle);
+            KillProcessByPid(popupPid);
+        }
+
+        // 2. Kill known EPSON Status Monitor host processes so popup no longer blocks
+        KillProcess("E_YARNYRE");   // EPSON Status Monitor host process
+        KillProcess("EPMNSNT");     // alternate EPSON monitor process name
+        KillProcess("E_S10IC2");    // another EPSON variant
+        KillProcess("E_F10IC2");
+        await Task.Delay(500, cancellationToken); // give the OS time to clean up
+
+        // 2. Reset WinSpool error flags.
+        _ = WinSpoolApi.SetPrinterStatusReset(printerName);
+        _ = WinSpoolApi.NudgePrinter(printerName);
+
+        // 3. Clear the cached fatal error so HasFatalHardwareError returns false
+        //    immediately on the next call, before the background loop runs again.
+        lock (_lock)
+        {
+            _fatalErrorCode = 0;
+            _fatalErrorMessage = string.Empty;
+        }
+        _lastErrorState = null;
+
+        _logger.LogInformation("[Resume] Printer reset complete. Polling for healthy state...");
+
+        // 4. Poll IsHealthy for up to 3 seconds so EnterPreFlightPauseAsync
+        //    immediately sees a clean printer rather than still-stale state.
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (IsHealthy(printerName, out _, out _))
+            {
+                _logger.LogInformation("[Resume] Printer is healthy after reset.");
+                return;
+            }
+            await Task.Delay(500, cancellationToken);
+        }
+
+        _logger.LogWarning("[Resume] Printer not yet healthy after 3s reset wait — patience loop will continue polling.");
+    }
+
+    private void KillProcessByPid(int pid)
+    {
+        try
+        {
+            var p = Process.GetProcessById(pid);
+            using (p)
+            {
+                p.Kill(true);
+            }
+        }
+        catch { }
     }
 
     private void KillProcess(string name)

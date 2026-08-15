@@ -22,6 +22,7 @@ builder.Services.AddSingleton<IJobOrchestrator, JobOrchestrator>();
 builder.Services.AddHostedService<PrintQueueWatcher>();
 
 builder.Services.AddSingleton<WorkerEventPipeClient>();
+builder.Services.AddHostedService<WorkerCommandListenerHostedService>();
 
 var host = builder.Build();
 

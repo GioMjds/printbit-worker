@@ -123,10 +123,11 @@ Critical constraints:
 - After health recovery, a final pre-flight check using the WinSpool API is executed. If the printer is still unhealthy, the print is failed fast with `PrintFailureStage.HardwareError`.
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
-- Spooler verification inspects `Win32_PrintJob.StatusMask` for `ERROR` (`0x2`) and `PAPEROUT` (`0x40`) flags, and checks `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3: Low Paper, No Paper, Low Toner, No Toner, Door Open, Jammed, Offline, Service Requested, Output Bin Full).
+- Spooler verification inspects `Win32_PrintJob.StatusMask` for `ERROR` (`0x2`) and `PAPEROUT` (`0x40`) flags, and checks `Win32_Printer.DetectedErrorState`, `Win32_Printer.PrinterState`, Windows Printer Registry `Status`, and Epson monitor popups for hardware errors (codes ≥ 3 or `FATAL_STATUS_MASK`).
 - Spooler verification also reads `Win32_PrintJob.PagesPrinted` vs `TotalPages`. If `PagesPrinted < TotalPages` for `IncompleteOutputStallSeconds` (3 s default), the job is failed with `PrintFailureStage.IncompleteOutput` (paper-out, jam, tray-empty, partial print). This is the primary signal that catches the "Status=Printed but page never came out" race.
 - The expected page count is computed up front by `PdfPageCounter` (parses the PDF's `/Type /Pages /Count` entry, no NuGet dep). If the count is unknown, verification falls back to the spooler's `TotalPages` only.
-- After a spooler job clears, `PagePrinter` keeps a 12-second post-clear hardware guard window to catch delayed Epson popup / monitor hardware signals before returning success.
+- After a spooler job clears (including fast-cleared jobs), `PagePrinter` runs a 12-second post-clear hardware guard window polling hardware error state every second to catch delayed Epson popup / monitor hardware signals (such as `W-01` paper out) before returning success.
+- `JobOrchestrator` also performs a post-flight hardware error check before completing a job to ensure jobs fail with `HardwareError` if the printer is in an error state at completion.
 - Page counts from WMI are unreliable and can lag behind job completion. If the job has cleared and the printer is completely healthy, the print is treated as a success even if the last polled page count was less than expected, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated or aborted job).
 - `PrinterHealthMonitor` now treats `DetectedErrorState` as fatal only when code ≥ 3 and exposes this status via `IsHealthy` and `HasFatalHardwareError`.
 - Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
@@ -269,7 +270,8 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
     "MaxMessageBytes": 8192,
-    "WorkerReturnPipeName": "printbit-worker-events"
+    "WorkerReturnPipeName": "printbit-worker-events",
+    "WorkerCommandPipeName": "printbit-worker-commands"
   }
 }
 ```

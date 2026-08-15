@@ -10,4 +10,8 @@ public interface IJobOrchestrator
         PrintJobRequest request,
         string jsonFilePath,
         CancellationToken cancellationToken);
+    
+    Task CancelActiveJobAsync(string spoolerCorrelationKey, string reason);
+    Task ResumeJobAsync(string spoolerCorrelationKey);
+    Task PauseJobAsync(string spoolerCorrelationKey, string reason);
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -15,6 +16,33 @@ namespace PrintBit.Infrastructure.Services.PrintService;
 
 public class JobOrchestrator : IJobOrchestrator
 {
+    // Signals a user-initiated pause. The dispatch loop awaits Gate.Task between
+    // pages; PauseJobAsync sets _userPaused and ResumeJobAsync clears it and
+    // completes the TCS. A fresh gate is swapped in on each resume so a second
+    // pause on the same job gets its own awaitable signal.
+    private sealed class PauseGate
+    {
+        private TaskCompletionSource _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public volatile bool UserPaused;
+        public Task Task => _tcs.Task;
+
+        public void Signal()
+        {
+            UserPaused = false;
+            _tcs.TrySetResult();
+        }
+
+        public PauseGate Reset()
+        {
+            _tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            UserPaused = false;
+            return this;
+        }
+    }
+
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeJobTokens = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _resumeSignals = new();
+    private readonly ConcurrentDictionary<string, PauseGate> _pauseGates = new();
     private readonly ILogger<JobOrchestrator> _logger;
     private readonly HardwareSettings _settings;
     private readonly IPagePrinter _pagePrinter;
@@ -62,17 +90,18 @@ public class JobOrchestrator : IJobOrchestrator
         }
         Directory.CreateDirectory(workDir);
 
-        // Split pages via qpdf
         try
         {
-            await SplitPdfPagesAsync(request.FilePath, workDir, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "qpdf split failed");
-            CleanWorkDirectory(workDir);
-            return PrintJobResult.Failed(PrintFailureStage.ProcessExit, $"qpdf split failed: {ex.Message}");
-        }
+            // Split pages via qpdf
+            try
+            {
+                await SplitPdfPagesAsync(request.FilePath, workDir, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "qpdf split failed");
+                return PrintJobResult.Failed(PrintFailureStage.ProcessExit, $"qpdf split failed: {ex.Message}");
+            }
 
         var pagesToPrint = GetPagesInRange(pdfPageCount.Value, request.Settings.PageRange);
         var totalCopies = Math.Max(1, request.Settings.Copies);
@@ -117,83 +146,172 @@ public class JobOrchestrator : IJobOrchestrator
             }, cancellationToken);
         }
 
-        for (int i = 0; i < manifest.Count; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var entry = manifest[i];
+        using var jobCts = new CancellationTokenSource();
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, jobCts.Token);
+        _activeJobTokens[spoolerCorrelationKey] = jobCts;
 
-            // 1. Pre-flight health check
-            if (!_healthMonitor.IsHealthy(request.PrinterName, out _, out _))
-            {
-                await EnterPreFlightPauseAsync(request, entry, cancellationToken);
-            }
+        // Resume signal: set by ResumeJobAsync when the operator loads paper.
+        // A fresh TCS is allocated per pause so that multiple pauses within
+        // the same job each get their own awaitable signal.
+        var resumeTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _resumeSignals[spoolerCorrelationKey] = resumeTcs;
 
-            if (entry.State == PagePrintState.Cancelled)
-            {
-                CancelRemaining(manifest, i);
-                cancelledCount += manifest.Count - i;
-                failureMessage = "Cancelled during pre-flight pause wait timeout";
-                finalFailureStage = PrintFailureStage.HardwareError;
-                break;
-            }
+        // User-initiated pause gate (distinct from the hardware-fault patience
+        // loop above). The dispatch loop checks this between pages.
+        var pauseGate = _pauseGates.GetOrAdd(spoolerCorrelationKey, _ => new PauseGate()).Reset();
 
-            // Find split page file
-            var pageFilePath = FindSplitPageFile(workDir, entry.PageNumber);
-            if (pageFilePath is null || !File.Exists(pageFilePath))
+            try
             {
-                entry.State = PagePrintState.Failed;
-                entry.ErrorMessage = $"Split page file for page {entry.PageNumber} not found";
-                failedCount++;
-                CancelRemaining(manifest, i + 1);
-                failureMessage = entry.ErrorMessage;
-                finalFailureStage = PrintFailureStage.Validation;
-                break;
-            }
+                for (int i = 0; i < manifest.Count; i++)
+                {
+                    linkedCts.Token.ThrowIfCancellationRequested();
+                    var entry = manifest[i];
 
-            entry.State = PagePrintState.Printing;
-            entry.StartedAt = DateTime.UtcNow;
+                    // 0. User-initiated pause hold. If the operator clicked Pause,
+                    //    hold here between pages until Resume (gate signalled) or
+                    //    Cancel (linked token trips ThrowIfCancellationRequested via
+                    //    WaitAsync). The live spooler job, if any, was already paused
+                    //    best-effort by PauseJobAsync.
+                    if (pauseGate.UserPaused)
+                    {
+                        await EmitJobPausedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, "User paused print job", "user", linkedCts.Token);
+                        try
+                        {
+                            await pauseGate.Task.WaitAsync(linkedCts.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        await EmitJobResumedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, linkedCts.Token);
+                    }
 
-            var printResult = await _pagePrinter.PrintPageAsync(
-                pageFilePath,
-                request.PrinterName,
-                entry.SequenceIndex,
-                onPaused: async (errMsg) => await EmitJobPausedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, errMsg, cancellationToken),
-                onResumed: async () => await EmitJobResumedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, cancellationToken),
-                cancellationToken);
+                    // 1. Pre-flight health check
+                    if (!_healthMonitor.IsHealthy(request.PrinterName, out _, out _))
+                    {
+                        // Auto-attempt to clear stale EPSON error state (popup, WinSpool, WMI cache)
+                        // before deciding to enter patience mode. This handles leftover errors from
+                        // a previous print session without requiring operator action.
+                        _logger.LogWarning("Pre-flight: printer unhealthy; attempting auto-dismiss/reset before pause.");
+                        await _healthMonitor.DismissAndResetAsync(request.PrinterName, linkedCts.Token);
 
-            entry.CompletedAt = DateTime.UtcNow;
-            if (printResult.State == PagePrintState.Completed)
-            {
-                entry.State = PagePrintState.Completed;
-                completedCount++;
-                await EmitPrintProgressAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, cancellationToken);
+                        // Re-check after recovery. Only enter patience if still unhealthy.
+                        if (!_healthMonitor.IsHealthy(request.PrinterName, out _, out _))
+                        {
+                            await EnterPreFlightPauseAsync(request, entry, resumeTcs.Task, linkedCts.Token);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Pre-flight: printer recovered after auto-dismiss/reset. Proceeding without pause.");
+                        }
+                    }
+
+
+                    if (entry.State == PagePrintState.Cancelled)
+                    {
+                        CancelRemaining(manifest, i);
+                        cancelledCount += manifest.Count - i;
+                        failureMessage = "Cancelled during pre-flight pause wait timeout";
+                        finalFailureStage = PrintFailureStage.HardwareError;
+                        break;
+                    }
+
+                    // Find split page file
+                    var pageFilePath = FindSplitPageFile(workDir, entry.PageNumber);
+                    if (pageFilePath is null || !File.Exists(pageFilePath))
+                    {
+                        entry.State = PagePrintState.Failed;
+                        entry.ErrorMessage = $"Split page file for page {entry.PageNumber} not found";
+                        failedCount++;
+                        CancelRemaining(manifest, i + 1);
+                        failureMessage = entry.ErrorMessage;
+                        finalFailureStage = PrintFailureStage.Validation;
+                        break;
+                    }
+
+                    entry.State = PagePrintState.Printing;
+                    entry.StartedAt = DateTime.UtcNow;
+
+                    var printResult = await _pagePrinter.PrintPageAsync(
+                        pageFilePath,
+                        request.PrinterName,
+                        entry.SequenceIndex,
+                        onPaused: async (errMsg) => await EmitJobPausedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, errMsg, "hardware", linkedCts.Token),
+                        onResumed: async () =>
+                        {
+                            // Replace the TCS so any subsequent pause on this job
+                            // gets a fresh, unset signal.
+                            var freshTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            _resumeSignals[spoolerCorrelationKey] = freshTcs;
+                            resumeTcs = freshTcs;
+                            await EmitJobResumedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, linkedCts.Token);
+                        },
+                        resumeSignalProvider: () => resumeTcs.Task,
+                        linkedCts.Token);
+
+                    entry.CompletedAt = DateTime.UtcNow;
+                    if (printResult.State == PagePrintState.Completed)
+                    {
+                        entry.State = PagePrintState.Completed;
+                        completedCount++;
+                        await EmitPrintProgressAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, linkedCts.Token);
+                    }
+                    else if (printResult.State == PagePrintState.Cancelled)
+                    {
+                        entry.State = PagePrintState.Cancelled;
+                        entry.ErrorMessage = printResult.ErrorMessage;
+                        cancelledCount++;
+                        CancelRemaining(manifest, i + 1);
+                        failureMessage = printResult.ErrorMessage;
+                        finalFailureStage = printResult.FailureStage;
+                        break;
+                    }
+                    else
+                    {
+                        entry.State = PagePrintState.Failed;
+                        entry.ErrorMessage = printResult.ErrorMessage;
+                        failedCount++;
+                        CancelRemaining(manifest, i + 1);
+                        failureMessage = printResult.ErrorMessage;
+                        finalFailureStage = printResult.FailureStage;
+                        break;
+                    }
+                }
             }
-            else if (printResult.State == PagePrintState.Cancelled)
+            catch (OperationCanceledException)
             {
-                entry.State = PagePrintState.Cancelled;
-                entry.ErrorMessage = printResult.ErrorMessage;
-                cancelledCount++;
-                CancelRemaining(manifest, i + 1);
-                failureMessage = printResult.ErrorMessage;
-                finalFailureStage = printResult.FailureStage;
-                break;
+                var nextIndex = manifest.FindIndex(m => m.State == PagePrintState.Pending || m.State == PagePrintState.Printing);
+                if (nextIndex >= 0)
+                {
+                    CancelRemaining(manifest, nextIndex);
+                    cancelledCount += manifest.Count - nextIndex;
+                }
+                failureMessage = "Job processing cancelled";
+                finalFailureStage = PrintFailureStage.UserCancelled;
             }
-            else
+            finally
             {
-                entry.State = PagePrintState.Failed;
-                entry.ErrorMessage = printResult.ErrorMessage;
-                failedCount++;
-                CancelRemaining(manifest, i + 1);
-                failureMessage = printResult.ErrorMessage;
-                finalFailureStage = printResult.FailureStage;
-                break;
+                _activeJobTokens.TryRemove(spoolerCorrelationKey, out _);
+                _resumeSignals.TryRemove(spoolerCorrelationKey, out _);
+                _pauseGates.TryRemove(spoolerCorrelationKey, out _);
             }
-        }
 
         var completedAt = DateTime.UtcNow;
         var outcome = "completed";
         if (failedCount > 0) outcome = "failed";
-        else if (cancelledCount > 0 || manifest.Any(m => m.State == PagePrintState.Cancelled)) outcome = "partially_completed";
+        else if (cancelledCount > 0 || manifest.Any(m => m.State == PagePrintState.Cancelled)) 
+        {
+            outcome = completedCount > 0 ? "partially_completed" : "cancelled";
+        }
+
+        if (outcome == "completed" && _healthMonitor.HasFatalHardwareError(request.PrinterName, out var fatalCode, out var fatalMsg))
+        {
+            _logger.LogWarning("Job pages finished but printer has fatal hardware error code {code}: {msg}", fatalCode, fatalMsg);
+            outcome = "failed";
+            failedCount = Math.Max(1, failedCount);
+            failureMessage = $"Printer hardware error after print: {fatalMsg}";
+            finalFailureStage = PrintFailureStage.HardwareError;
+        }
 
         var pageResults = manifest.Select(m => new WorkerPrintPageResult
         {
@@ -223,28 +341,31 @@ public class JobOrchestrator : IJobOrchestrator
             Message = outcome == "completed" ? "Print job completed successfully" : $"Print job finished with state: {outcome}. {failureMessage}"
         };
 
-        if (_eventPipe is not null)
-        {
-            await _eventPipe.SendAsync(finalEvent, cancellationToken);
+            if (_eventPipe is not null)
+            {
+                await _eventPipe.SendAsync(finalEvent, cancellationToken);
+            }
+
+            if (outcome == "failed")
+            {
+                return PrintJobResult.Failed(finalFailureStage, failureMessage ?? "Job execution failed");
+            }
+
+            return new PrintJobResult
+            {
+                Success = true,
+                Message = $"Print job {outcome}",
+                SumatraProcessSucceeded = true,
+                VerificationSucceeded = true,
+                PagesPrinted = completedCount,
+                TotalPages = manifest.Count
+            };
         }
-
-        // Clean work directory
-        CleanWorkDirectory(workDir);
-
-        if (outcome == "failed")
+        finally
         {
-            return PrintJobResult.Failed(finalFailureStage, failureMessage ?? "Job execution failed");
+            // Clean work directory
+            CleanWorkDirectory(workDir);
         }
-
-        return new PrintJobResult
-        {
-            Success = true,
-            Message = $"Print job {outcome}",
-            SumatraProcessSucceeded = true,
-            VerificationSucceeded = true,
-            PagesPrinted = completedCount,
-            TotalPages = manifest.Count
-        };
     }
 
     protected virtual async Task SplitPdfPagesAsync(string filePath, string workDir, CancellationToken cancellationToken)
@@ -267,6 +388,8 @@ public class JobOrchestrator : IJobOrchestrator
 
         try
         {
+            var stdOutTask = process.StandardOutput.ReadToEndAsync();
+            var stdErrTask = process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync(linkedCts.Token);
         }
         catch (OperationCanceledException)
@@ -337,19 +460,31 @@ public class JobOrchestrator : IJobOrchestrator
     private async Task EnterPreFlightPauseAsync(
         PrintJobRequest request,
         PagePrintEntry entry,
+        Task resumeSignal,
         CancellationToken cancellationToken)
     {
         var (tx, sck) = PrintJobFileName.TryParseCorrelation(Path.GetFileName(request.FilePath));
-        await EmitJobPausedAsync(tx, sck, entry, entry.SequenceIndex, entry.SequenceIndex + 1, "Printer unhealthy before page dispatch", cancellationToken);
+        await EmitJobPausedAsync(tx, sck, entry, entry.SequenceIndex, entry.SequenceIndex + 1, "Printer unhealthy before page dispatch", "hardware", cancellationToken);
 
         var deadline = DateTime.UtcNow.AddMinutes(_settings.PauseTimeoutMinutes);
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await Task.Delay(2000, cancellationToken);
+
+            // Wake immediately if the operator clicks Resume, instead of waiting
+            // the full 2-second polling interval.
+            await Task.WhenAny(Task.Delay(2000, cancellationToken), resumeSignal);
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (_healthMonitor.IsHealthy(request.PrinterName, out _, out _))
             {
+                // Replace TCS before emitting JobResumed so a subsequent
+                // pause within the same job gets a fresh signal.
+                if (_resumeSignals.TryGetValue(sck ?? string.Empty, out var oldTcs) && oldTcs.Task.IsCompleted)
+                {
+                    var freshTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _resumeSignals[sck ?? string.Empty] = freshTcs;
+                }
                 await EmitJobResumedAsync(tx, sck, entry, entry.SequenceIndex, entry.SequenceIndex + 1, cancellationToken);
                 return;
             }
@@ -358,7 +493,7 @@ public class JobOrchestrator : IJobOrchestrator
         entry.ErrorMessage = "Pause timeout exceeded during pre-flight health wait";
     }
 
-    private async Task EmitJobPausedAsync(string? tx, string? sck, PagePrintEntry entry, int completed, int total, string reason, CancellationToken ct)
+    private async Task EmitJobPausedAsync(string? tx, string? sck, PagePrintEntry entry, int completed, int total, string reason, string pauseReason, CancellationToken ct)
     {
         var evt = new WorkerPrintEvent
         {
@@ -369,7 +504,10 @@ public class JobOrchestrator : IJobOrchestrator
             FailedCopyNumber = entry.CopyNumber,
             CompletedCount = completed,
             TotalCount = total,
-            ErrorMessage = reason,
+            FailureStage = pauseReason == "user" ? null : "HardwareError",
+            Message = reason,
+            ErrorMessage = pauseReason == "user" ? null : reason,
+            PauseReason = pauseReason,
             TimestampUtc = DateTime.UtcNow
         };
         if (_eventPipe is not null)
@@ -420,5 +558,92 @@ public class JobOrchestrator : IJobOrchestrator
     {
         try { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
         catch (Exception ex) { _logger.LogWarning(ex, "Failed to clean working directory {dir}", dir); }
+    }
+
+    public Task PauseJobAsync(string spoolerCorrelationKey, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(spoolerCorrelationKey))
+            return Task.CompletedTask;
+
+        if (!_pauseGates.TryGetValue(spoolerCorrelationKey, out var gate))
+        {
+            _logger.LogInformation("Pause requested for key {Key} but no active job found.", spoolerCorrelationKey);
+            return Task.CompletedTask;
+        }
+
+        gate.UserPaused = true;
+        _logger.LogInformation("User pause set for job key {Key}: {Reason}", spoolerCorrelationKey, reason);
+
+        // Best-effort: pause the live spooler job so a page already handed to
+        // the spooler halts mid-way. The between-pages dispatch hold (B3) is
+        // the guaranteed mechanism regardless of whether this succeeds.
+        if (!string.IsNullOrWhiteSpace(_settings.PrinterName))
+        {
+            _healthMonitor.PauseMatchingJobs(_settings.PrinterName, spoolerCorrelationKey, null);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public async Task ResumeJobAsync(string spoolerCorrelationKey)
+    {
+        _logger.LogInformation("Resume requested for job key {Key}", spoolerCorrelationKey);
+
+        var isUserPaused = _pauseGates.TryGetValue(spoolerCorrelationKey, out var gate) && gate.UserPaused;
+
+        if (isUserPaused)
+        {
+            // User-initiated pause: resume the live spooler job and signal the
+            // dispatch-loop gate. Only dismiss/reset the printer if it is
+            // actually unhealthy (don't touch a healthy printer).
+            if (!string.IsNullOrWhiteSpace(_settings.PrinterName))
+            {
+                _healthMonitor.ResumeMatchingJobs(_settings.PrinterName, spoolerCorrelationKey, null);
+                if (_healthMonitor.HasFatalHardwareError(_settings.PrinterName, out _, out _))
+                {
+                    await _healthMonitor.DismissAndResetAsync(_settings.PrinterName, CancellationToken.None);
+                }
+            }
+            gate!.Signal();
+        }
+        else
+        {
+            // Hardware-fault pause: dismiss/reset the Epson error and signal
+            // the patience-loop TCS so it wakes immediately.
+            if (!string.IsNullOrWhiteSpace(_settings.PrinterName))
+            {
+                await _healthMonitor.DismissAndResetAsync(_settings.PrinterName, CancellationToken.None);
+            }
+
+            if (_resumeSignals.TryGetValue(spoolerCorrelationKey, out var tcs))
+            {
+                tcs.TrySetResult();
+            }
+            else
+            {
+                _logger.LogWarning("Resume requested for key {Key} but no resume signal found (job may have already finished)", spoolerCorrelationKey);
+            }
+        }
+    }
+
+    public Task CancelActiveJobAsync(string spoolerCorrelationKey, string reason)
+    {
+        if (!string.IsNullOrWhiteSpace(spoolerCorrelationKey) && _activeJobTokens.TryGetValue(spoolerCorrelationKey, out var cts))
+        {
+            _logger.LogInformation("Signalling cancellation token for job key {Key} due to: {Reason}", spoolerCorrelationKey, reason);
+            try
+            {
+                cts.Cancel();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error signalling cancellation token for job key {Key}", spoolerCorrelationKey);
+            }
+        }
+        else
+        {
+            _logger.LogInformation("Cancel requested for job key {Key}, but no active CTS found.", spoolerCorrelationKey);
+        }
+        return Task.CompletedTask;
     }
 }

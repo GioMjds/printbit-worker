@@ -6,6 +6,15 @@ namespace PrintBit.Infrastructure.IPC;
 
 public sealed record WorkerPrintEvent
 {
+    [JsonPropertyName("protocolVersion")]
+    public int? ProtocolVersion { get; init; }
+
+    [JsonPropertyName("eventId")]
+    public string? EventId { get; init; }
+
+    [JsonPropertyName("sequence")]
+    public long? Sequence { get; init; }
+
     [JsonPropertyName("type")]
     public WorkerPrintEventType Type { get; init; }
 
@@ -89,4 +98,13 @@ public sealed record WorkerPrintEvent
 
     [JsonPropertyName("errorMessage")]
     public string? ErrorMessage { get; init; }
+
+    /// <summary>
+    /// Discriminates the pause origin for <see cref="WorkerPrintEventType.JobPaused"/> events.
+    /// "user" = operator clicked Pause on a healthy job.
+    /// "hardware" = automatic pause due to a printer fault (paper-out, jam, etc.).
+    /// Null on all other event types.
+    /// </summary>
+    [JsonPropertyName("pauseReason")]
+    public string? PauseReason { get; init; }
 }
