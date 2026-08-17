@@ -71,7 +71,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         winSpoolStatus = (int)status;
         var wsHealthy = winSpoolOk && ((status & WinSpoolApi.FATAL_STATUS_MASK) == 0);
         var wmiHealthy = IsWmiHealthy(printerName, out _);
-        var (hasPopup, _, _) = CheckEpsonStatusMonitorPopup(printerName);
+        var (hasPopup, _, _, _) = CheckEpsonStatusMonitorPopup(printerName);
 
         return wsHealthy && wmiHealthy && !hasPopup;
     }
@@ -106,11 +106,11 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             return true;
         }
 
-        var (hasPopup, pid, title) = CheckEpsonStatusMonitorPopup(printerName);
+        var (hasPopup, pid, title, content) = CheckEpsonStatusMonitorPopup(printerName);
         if (hasPopup)
         {
             errorCode = 99;
-            errorMessage = $"Epson Popup: {title} (PID {pid})";
+            errorMessage = $"Epson Popup: {content}";
             return true;
         }
 
@@ -375,11 +375,12 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         _ => $"Unknown Error ({code})"
     };
 
-    private (bool HasPopup, int ProcessId, string WindowTitle) CheckEpsonStatusMonitorPopup(string printerName)
+    private (bool HasPopup, int ProcessId, string WindowTitle, string Content) CheckEpsonStatusMonitorPopup(string printerName)
     {
         bool found = false;
         int targetPid = 0;
         string foundTitle = string.Empty;
+        string foundContent = string.Empty;
 
         try
         {
@@ -431,6 +432,12 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                                 found = true;
                                 targetPid = (int)pid;
                                 foundTitle = title;
+                                
+                                // Clean up the content string for Kiosk display (remove newlines and generic text)
+                                var cleanContent = string.Join(" | ", fullContent
+                                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                    .Where(l => !l.Contains("EPSON Status Monitor") && !l.Contains("Buy EPSON Ink")));
+                                foundContent = cleanContent.Length > 0 ? cleanContent : "Epson popup error";
                                 return false;
                             }
                         }
@@ -443,7 +450,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         {
             // ignored
         }
-        return (found, targetPid, foundTitle);
+        return (found, targetPid, foundTitle, foundContent);
     }
 
     private void KillProcess(string name)

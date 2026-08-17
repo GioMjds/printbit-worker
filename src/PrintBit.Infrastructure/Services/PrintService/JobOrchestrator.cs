@@ -220,6 +220,7 @@ public class JobOrchestrator : IJobOrchestrator
             Pages = pageResults,
             StartedAt = startedAt,
             CompletedAt = completedAt,
+            FailureStage = finalFailureStage == PrintFailureStage.None ? null : finalFailureStage.ToString(),
             Message = outcome == "completed" ? "Print job completed successfully" : $"Print job finished with state: {outcome}. {failureMessage}"
         };
 
