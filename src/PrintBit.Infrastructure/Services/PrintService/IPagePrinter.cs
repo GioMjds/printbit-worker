@@ -13,6 +13,5 @@ public interface IPagePrinter
         int sequenceIndex,
         Func<string, Task> onPaused,
         Func<Task> onResumed,
-        Func<Task> resumeSignalProvider,
         CancellationToken cancellationToken);
 }

@@ -46,12 +46,6 @@ public static class WinSpoolApi
 
     public const int PRINTER_CONTROL_SET_STATUS = 4;
 
-    // Job control commands for SetJob (winspool). Used to pause/resume/cancel
-    // an individual spooler job by its JobId — see PauseJob/ResumeJob below.
-    public const int JOB_CONTROL_PAUSE = 1;
-    public const int JOB_CONTROL_RESUME = 2;
-    public const int JOB_CONTROL_CANCEL = 3;
-
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
     private struct PRINTER_INFO_2
     {
@@ -97,9 +91,6 @@ public static class WinSpoolApi
 
     [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern bool SetPrinter(IntPtr hPrinter, int dwLevel, IntPtr pPrinter, int dwCommand);
-
-    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern bool SetJob(IntPtr hPrinter, int jobId, int level, IntPtr pJob, int command);
 
     [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern int StartDocPrinter(IntPtr hPrinter, int level, ref DOC_INFO_1 di1);
@@ -223,47 +214,6 @@ public static class WinSpoolApi
             _ = ClosePrinter(hPrinter);
         }
     }
-
-    /// <summary>
-    /// Issues a SetJob control command (pause/resume/cancel) against a single
-    /// spooler job. Best-effort: opens the printer, calls SetJob, closes the
-    /// handle. Returns false on any failure and never throws so callers can
-    /// treat the live-spooler pause as an enhancement over the between-pages
-    /// dispatch hold.
-    /// </summary>
-    public static bool ControlJob(string printerName, int jobId, int command)
-    {
-        if (jobId <= 0)
-        {
-            return false;
-        }
-
-        if (!OpenPrinter(printerName, out IntPtr hPrinter, IntPtr.Zero))
-        {
-            return false;
-        }
-
-        try
-        {
-            return SetJob(hPrinter, jobId, 0, IntPtr.Zero, command);
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            _ = ClosePrinter(hPrinter);
-        }
-    }
-
-    /// <summary>Pauses a single spooler job by JobId. Best-effort.</summary>
-    public static bool PauseJob(string printerName, int jobId) =>
-        ControlJob(printerName, jobId, JOB_CONTROL_PAUSE);
-
-    /// <summary>Resumes a single paused spooler job by JobId. Best-effort.</summary>
-    public static bool ResumeJob(string printerName, int jobId) =>
-        ControlJob(printerName, jobId, JOB_CONTROL_RESUME);
 
     public static string GetStatusDescription(uint status)
     {

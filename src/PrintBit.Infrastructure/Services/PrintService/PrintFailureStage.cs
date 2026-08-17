@@ -13,7 +13,5 @@ public enum PrintFailureStage
     // TotalPages in the spooler verification loop.
     IncompleteOutput,
     Unexpected,
-    HardwareError,
-    UserCancelled
+    HardwareError
 }
-

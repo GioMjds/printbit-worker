@@ -55,7 +55,6 @@ public class PagePrinterTests
             0,
             _ => Task.CompletedTask,
             () => Task.CompletedTask,
-            () => Task.CompletedTask,
             CancellationToken.None);
 
         Assert.Equal(PagePrintState.Failed, result.State);
@@ -91,7 +90,6 @@ public class PagePrinterTests
                 "TestPrinter",
                 0,
                 _ => Task.CompletedTask,
-                () => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
 
@@ -142,7 +140,6 @@ public class PagePrinterTests
                 0,
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
-                () => Task.CompletedTask,
                 CancellationToken.None);
 
             Assert.Equal(PagePrintState.Completed, result.State);
@@ -187,7 +184,6 @@ public class PagePrinterTests
                 "TestPrinter",
                 0,
                 _ => Task.CompletedTask,
-                () => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
 
@@ -237,7 +233,6 @@ public class PagePrinterTests
                 "TestPrinter",
                 0,
                 _ => Task.CompletedTask,
-                () => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
 

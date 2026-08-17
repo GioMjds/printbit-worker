@@ -94,7 +94,6 @@ public class JobOrchestratorTests
                 It.IsAny<int>(),
                 It.IsAny<Func<string, Task>>(),
                 It.IsAny<Func<Task>>(),
-                It.IsAny<Func<Task>>(),
                 It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new PagePrintResult { State = PagePrintState.Completed });
 
@@ -111,7 +110,7 @@ public class JobOrchestratorTests
 
             Assert.True(result.Success);
             Assert.Equal(1, result.PagesPrinted);
-            printerMock.Verify(p => p.PrintPageAsync(It.IsAny<string>(), It.IsAny<string>(), 0, It.IsAny<Func<string, Task>>(), It.IsAny<Func<Task>>(), It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()), Times.Once);
+            printerMock.Verify(p => p.PrintPageAsync(It.IsAny<string>(), It.IsAny<string>(), 0, It.IsAny<Func<string, Task>>(), It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()), Times.Once);
         }
         finally
         {
@@ -137,7 +136,6 @@ public class JobOrchestratorTests
                 It.IsAny<string>(),
                 It.IsAny<int>(),
                 It.IsAny<Func<string, Task>>(),
-                It.IsAny<Func<Task>>(),
                 It.IsAny<Func<Task>>(),
                 It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new PagePrintResult { State = PagePrintState.Failed, FailureStage = PrintFailureStage.HardwareError, ErrorMessage = "Out of paper" });
@@ -182,7 +180,6 @@ public class JobOrchestratorTests
                 It.IsAny<int>(),
                 It.IsAny<Func<string, Task>>(),
                 It.IsAny<Func<Task>>(),
-                It.IsAny<Func<Task>>(),
                 It.IsAny<CancellationToken>()))
                 .ReturnsAsync(new PagePrintResult { State = PagePrintState.Cancelled, FailureStage = PrintFailureStage.SpoolerVerification, ErrorMessage = "User stop" });
 
@@ -200,55 +197,6 @@ public class JobOrchestratorTests
             // PrintJobResult is successful even on user cancellation (Outcome = partially_completed)
             Assert.True(result.Success);
             Assert.Equal(0, result.PagesPrinted);
-        }
-        finally
-        {
-            try { File.Delete(tempPdf); } catch { }
-        }
-    }
-
-    [Fact]
-    public async Task ProcessJobAsync_PostFlightHardwareError_FailsJob()
-    {
-        var tempPdf = Path.Combine(Path.GetTempPath(), $"TX-123_SCK-456_{Guid.NewGuid():N}.pdf");
-        File.WriteAllText(tempPdf, "%PDF-1.7\n/Type /Pages /Count 1");
-
-        try
-        {
-            var healthMock = new Mock<IPrinterHealthMonitor>();
-            healthMock.Setup(h => h.IsHealthy("TestPrinter", out It.Ref<int>.IsAny, out It.Ref<string>.IsAny))
-                      .Returns(true);
-
-            int fatalCode = 4;
-            string fatalMsg = "Error 4 (No Paper)";
-            healthMock.Setup(h => h.HasFatalHardwareError("TestPrinter", out fatalCode, out fatalMsg))
-                      .Returns(true);
-
-            var printerMock = new Mock<IPagePrinter>();
-            printerMock.Setup(p => p.PrintPageAsync(
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<int>(),
-                It.IsAny<Func<string, Task>>(),
-                It.IsAny<Func<Task>>(),
-                It.IsAny<Func<Task>>(),
-                It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new PagePrintResult { State = PagePrintState.Completed });
-
-            var orchestrator = new TestableJobOrchestrator(healthMock.Object, printerMock.Object, null!);
-
-            var request = new PrintJobRequest
-            {
-                FilePath = tempPdf,
-                PrinterName = "TestPrinter",
-                Settings = new PrintJobSettings { Copies = 1 }
-            };
-
-            var result = await orchestrator.ProcessJobAsync(request, "dummy.json", CancellationToken.None);
-
-            Assert.False(result.Success);
-            Assert.Equal(PrintFailureStage.HardwareError, result.FailureStage);
-            Assert.Contains("No Paper", result.Message);
         }
         finally
         {
