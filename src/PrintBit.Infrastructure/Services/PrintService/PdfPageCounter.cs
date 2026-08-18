@@ -1,23 +1,17 @@
+using System.Diagnostics;
+using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 
 namespace PrintBit.Infrastructure.Services.PrintService;
 
 /// <summary>
-/// Counts the number of pages in a PDF file by scanning for the
+/// Counts the number of pages in a PDF file. First scans for the
 /// /Count entry inside a /Type /Pages object (PDF 1.7 spec,
-/// ISO 32000-1 §7.7.2 / §7.7.3.3).
+/// ISO 32000-1 §7.7.2 / §7.7.3.3). If object streams or Flate compression
+/// prevent raw token matching, falls back to `qpdf --show-npages`.
 ///
-/// Intentionally lightweight: no NuGet dependency, no full PDF parser.
-/// Designed for the print verification path, which only needs an
-/// authoritative number to compare against the spooler's
-/// Win32_PrintJob.TotalPages. If the file is encrypted, corrupt, or
-/// non-PDF, returns null — the caller falls back to the spooler's
-/// reported total.
-///
-/// This function never throws. The print verification path is
-/// best-effort: a null result is acceptable and means "trust the
-/// spooler".
+/// This function never throws.
 /// </summary>
 internal static class PdfPageCounter
 {
@@ -36,7 +30,7 @@ internal static class PdfPageCounter
     /// </summary>
     private const int ScanWindowBytes = 2 * 1024 * 1024;
 
-    public static int? Count(string filePath)
+    public static int? Count(string filePath, string? qpdfPath = null)
     {
         if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
         {
@@ -74,16 +68,88 @@ internal static class PdfPageCounter
             }
 
             // 2) Last resort: count /Type /Page tokens (excluding
-            //    /Type /Pages). This over-counts on PDFs with form
-            //    XObjects that have /Type /Page, but is the only way
-            //    to recover when the trailer is missing or truncated.
+            //    /Type /Pages).
             count = CountPageObjects(headWindow, tailWindow);
-            return count is > 0 ? count : null;
+            if (count is > 0)
+            {
+                return count;
+            }
         }
         catch
         {
+            // fallback to qpdf below
+        }
+
+        // 3) Robust fallback: qpdf --show-npages (handles Flate/compressed object streams)
+        return CountViaQpdf(filePath, qpdfPath);
+    }
+
+    private static int? CountViaQpdf(string filePath, string? qpdfPath)
+    {
+        var resolvedQpdf = ResolveQpdfPath(qpdfPath);
+        if (string.IsNullOrWhiteSpace(resolvedQpdf) || !File.Exists(resolvedQpdf))
+        {
             return null;
         }
+
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = resolvedQpdf,
+                    Arguments = $"--show-npages \"{filePath}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+
+            process.Start();
+            if (!process.WaitForExit(5000))
+            {
+                try { process.Kill(true); } catch { }
+                return null;
+            }
+
+            if (process.ExitCode == 0)
+            {
+                var output = process.StandardOutput.ReadToEnd().Trim();
+                if (int.TryParse(output, out var n) && n > 0)
+                {
+                    return n;
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return null;
+    }
+
+    private static string? ResolveQpdfPath(string? qpdfPath)
+    {
+        if (!string.IsNullOrWhiteSpace(qpdfPath) && File.Exists(qpdfPath))
+        {
+            return qpdfPath;
+        }
+
+        string[] standardLocations = [
+            @"C:\Program Files\qpdf 12.3.2\bin\qpdf.exe",
+            @"C:\Program Files\qpdf\bin\qpdf.exe",
+            @"C:\Users\printbit\bin\qpdf.exe"
+        ];
+
+        foreach (var loc in standardLocations)
+        {
+            if (File.Exists(loc)) return loc;
+        }
+
+        return null;
     }
 
     private static byte[] ReadHeadWindow(FileStream stream, int maxBytes)

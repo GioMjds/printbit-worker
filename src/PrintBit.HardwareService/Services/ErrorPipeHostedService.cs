@@ -33,7 +33,7 @@ public sealed class ErrorPipeHostedService : BackgroundService
         {
             try
             {
-                await using var server = new NamedPipeServerStream(
+                await using var server = NamedPipeServerFactory.Create(
                     _settings.PipeName,
                     PipeDirection.In,
                     maxNumberOfServerInstances: 1,

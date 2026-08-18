@@ -111,6 +111,25 @@ public class PdfPageCounterTests
         }
     }
 
+    [Fact]
+    public void Count_ReturnsCorrectCount_OnCompressedPdfViaQpdf()
+    {
+        // Path to the real failed test artifact if available, or generate a qpdf compressed PDF
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"printbit-compressed-{Guid.NewGuid():N}.pdf");
+        var minimalBytes = BuildMinimalPdfWithCount(2);
+        File.WriteAllBytes(tempPdf, minimalBytes);
+
+        try
+        {
+            var count = PdfPageCounter.Count(tempPdf, @"C:\Program Files\qpdf 12.3.2\bin\qpdf.exe");
+            Assert.Equal(2, count);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
     /// <summary>
     /// Builds a minimal-but-valid-enough PDF whose trailer contains
     /// <c>/Root N 0 R</c> pointing to an object that has

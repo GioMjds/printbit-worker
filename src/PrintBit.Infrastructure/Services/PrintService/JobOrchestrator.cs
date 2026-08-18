@@ -49,12 +49,6 @@ public class JobOrchestrator : IJobOrchestrator
             return PrintJobResult.Failed(PrintFailureStage.Validation, "Filename does not match the tx_spool layout");
         }
 
-        var pdfPageCount = PdfPageCounter.Count(request.FilePath);
-        if (pdfPageCount is null || pdfPageCount.Value == 0)
-        {
-            return PrintJobResult.Failed(PrintFailureStage.Validation, "Could not determine PDF page count or PDF is corrupt");
-        }
-
         var workDir = Path.Combine(Path.GetDirectoryName(request.FilePath) ?? ".", ".work", $"{transactionId}_{spoolerCorrelationKey}");
         if (Directory.Exists(workDir))
         {
@@ -69,9 +63,25 @@ public class JobOrchestrator : IJobOrchestrator
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "qpdf split failed");
+            _logger.LogError(ex, "qpdf split failed for {file}", request.FilePath);
             CleanWorkDirectory(workDir);
             return PrintJobResult.Failed(PrintFailureStage.ProcessExit, $"qpdf split failed: {ex.Message}");
+        }
+
+        var pdfPageCount = PdfPageCounter.Count(request.FilePath, _settings.QpdfPath);
+        if (pdfPageCount is null || pdfPageCount.Value == 0)
+        {
+            var splitCount = Directory.GetFiles(workDir, "page-*.pdf").Length;
+            if (splitCount > 0)
+            {
+                pdfPageCount = splitCount;
+            }
+            else
+            {
+                _logger.LogError("Validation failed: Could not determine PDF page count for {file}", request.FilePath);
+                CleanWorkDirectory(workDir);
+                return PrintJobResult.Failed(PrintFailureStage.Validation, "Could not determine PDF page count or PDF is corrupt");
+            }
         }
 
         var pagesToPrint = GetPagesInRange(pdfPageCount.Value, request.Settings.PageRange);
@@ -157,6 +167,7 @@ public class JobOrchestrator : IJobOrchestrator
                 pageFilePath,
                 request.PrinterName,
                 entry.SequenceIndex,
+                request.Settings.Color,
                 onPaused: async (errMsg) => await EmitJobPausedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, errMsg, cancellationToken),
                 onResumed: async () => await EmitJobResumedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, cancellationToken),
                 cancellationToken);

@@ -31,6 +31,7 @@ public class PagePrinter : IPagePrinter
         string filePath,
         string printerName,
         int sequenceIndex,
+        bool color,
         Func<string, Task> onPaused,
         Func<Task> onResumed,
         CancellationToken cancellationToken)
@@ -49,13 +50,14 @@ public class PagePrinter : IPagePrinter
                 return new PagePrintResult { State = PagePrintState.Failed, FailureStage = PrintFailureStage.Validation, ErrorMessage = "SumatraPDF executable not found" };
             }
 
-            _logger.LogInformation("Dispatching SumatraPDF for page {filePath} on printer {printerName}", filePath, printerName);
+            var printSettings = color ? "color" : "monochrome";
+            _logger.LogInformation("Dispatching SumatraPDF for page {filePath} on printer {printerName} (settings={printSettings})", filePath, printerName, printSettings);
             using var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = sumatraPath,
-                    Arguments = $"-print-to \"{printerName}\" -silent \"{filePath}\"",
+                    Arguments = $"-print-to \"{printerName}\" -print-settings \"{printSettings}\" -silent \"{filePath}\"",
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,

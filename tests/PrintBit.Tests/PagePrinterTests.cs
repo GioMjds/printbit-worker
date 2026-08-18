@@ -53,6 +53,7 @@ public class PagePrinterTests
             "nonexistent.pdf",
             "PrinterName",
             0,
+            false,
             _ => Task.CompletedTask,
             () => Task.CompletedTask,
             CancellationToken.None);
@@ -89,6 +90,7 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
+                false,
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
@@ -138,6 +140,7 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
+                false,
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
@@ -183,6 +186,7 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
+                false,
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
@@ -232,6 +236,7 @@ public class PagePrinterTests
                 tempPdf,
                 "TestPrinter",
                 0,
+                false,
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);

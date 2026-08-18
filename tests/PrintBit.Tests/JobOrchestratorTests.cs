@@ -92,6 +92,7 @@ public class JobOrchestratorTests
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<int>(),
+                It.IsAny<bool>(),
                 It.IsAny<Func<string, Task>>(),
                 It.IsAny<Func<Task>>(),
                 It.IsAny<CancellationToken>()))
@@ -110,7 +111,7 @@ public class JobOrchestratorTests
 
             Assert.True(result.Success);
             Assert.Equal(1, result.PagesPrinted);
-            printerMock.Verify(p => p.PrintPageAsync(It.IsAny<string>(), It.IsAny<string>(), 0, It.IsAny<Func<string, Task>>(), It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()), Times.Once);
+            printerMock.Verify(p => p.PrintPageAsync(It.IsAny<string>(), It.IsAny<string>(), 0, It.IsAny<bool>(), It.IsAny<Func<string, Task>>(), It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()), Times.Once);
         }
         finally
         {
@@ -135,6 +136,7 @@ public class JobOrchestratorTests
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<int>(),
+                It.IsAny<bool>(),
                 It.IsAny<Func<string, Task>>(),
                 It.IsAny<Func<Task>>(),
                 It.IsAny<CancellationToken>()))
@@ -178,6 +180,7 @@ public class JobOrchestratorTests
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<int>(),
+                It.IsAny<bool>(),
                 It.IsAny<Func<string, Task>>(),
                 It.IsAny<Func<Task>>(),
                 It.IsAny<CancellationToken>()))
