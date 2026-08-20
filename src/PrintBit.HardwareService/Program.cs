@@ -10,6 +10,11 @@ builder.Services.Configure<HardwareSettings>(builder.Configuration.GetSection("H
 
 builder.Services.Configure<IpcSettings>(builder.Configuration.GetSection("IpcSettings"));
 
+builder.Services.AddWindowsService(options =>
+{
+    options.ServiceName = "PrintBitHardware";
+});
+
 builder.Services.AddHostedService<ErrorPipeHostedService>();
 
 // Registrations for the new page-level spooler dispatch model
