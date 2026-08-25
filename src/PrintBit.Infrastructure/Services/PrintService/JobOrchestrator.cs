@@ -168,6 +168,7 @@ public class JobOrchestrator : IJobOrchestrator
                 request.PrinterName,
                 entry.SequenceIndex,
                 request.Settings.Color,
+                request.Settings.Quality,
                 onPaused: async (errMsg) => await EmitJobPausedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, errMsg, cancellationToken),
                 onResumed: async () => await EmitJobResumedAsync(transactionId, spoolerCorrelationKey, entry, completedCount, manifest.Count, cancellationToken),
                 cancellationToken);

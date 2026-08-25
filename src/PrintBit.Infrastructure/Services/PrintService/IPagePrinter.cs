@@ -12,6 +12,7 @@ public interface IPagePrinter
         string printerName,
         int sequenceIndex,
         bool color,
+        string quality,
         Func<string, Task> onPaused,
         Func<Task> onResumed,
         CancellationToken cancellationToken);

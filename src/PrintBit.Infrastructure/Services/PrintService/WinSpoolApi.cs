@@ -45,6 +45,55 @@ public static class WinSpoolApi
                                           PRINTER_STATUS_DOOR_OPEN;
 
     public const int PRINTER_CONTROL_SET_STATUS = 4;
+    public const int DM_PRINTQUALITY = 0x00000400;
+    public const short DMRES_HIGH = -4;
+    public const short DMRES_MEDIUM = -3;
+    public const short DMRES_LOW = -2;
+    public const short DMRES_DRAFT = -1;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public struct DEVMODE
+    {
+        private const int CCHDEVICENAME = 32;
+        private const int CCHFORMNAME = 32;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCHDEVICENAME)]
+        public string dmDeviceName;
+        public short dmSpecVersion;
+        public short dmDriverVersion;
+        public short dmSize;
+        public short dmDriverExtra;
+        public int dmFields;
+        public short dmOrientation;
+        public short dmPaperSize;
+        public short dmPaperLength;
+        public short dmPaperWidth;
+        public short dmScale;
+        public short dmCopies;
+        public short dmDefaultSource;
+        public short dmPrintQuality;
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCHFORMNAME)]
+        public string dmFormName;
+        public short dmLogPixels;
+        public short dmBitsPerPel;
+        public int dmPelsWidth;
+        public int dmPelsHeight;
+        public int dmNup;
+        public int dmDisplayFrequency;
+        public int dmICMMethod;
+        public int dmICMIntent;
+        public int dmMediaType;
+        public int dmDitherType;
+        public int dmReserved1;
+        public int dmReserved2;
+        public int dmPanningWidth;
+        public int dmPanningHeight;
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
     private struct PRINTER_INFO_2
@@ -244,5 +293,57 @@ public static class WinSpoolApi
         if ((status & PRINTER_STATUS_POWER_SAVE) != 0) flags.Add("POWER_SAVE");
 
         return flags.Count > 0 ? string.Join("|", flags) : "READY";
+    }
+
+    public static bool SetPrinterQuality(string printerName, string quality)
+    {
+        if (!OpenPrinter(printerName, out IntPtr hPrinter, IntPtr.Zero))
+        {
+            return false;
+        }
+
+        try
+        {
+            _ = GetPrinter(hPrinter, 2, IntPtr.Zero, 0, out int cbNeeded);
+            if (cbNeeded <= 0) return false;
+
+            IntPtr pPrinter = Marshal.AllocHGlobal(cbNeeded);
+            try
+            {
+                if (!GetPrinter(hPrinter, 2, pPrinter, cbNeeded, out _))
+                {
+                    return false;
+                }
+
+                var info = Marshal.PtrToStructure<PRINTER_INFO_2>(pPrinter);
+                if (info.pDevMode == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                var devMode = Marshal.PtrToStructure<DEVMODE>(info.pDevMode);
+                devMode.dmFields |= DM_PRINTQUALITY;
+                devMode.dmPrintQuality = quality.Equals("high", StringComparison.OrdinalIgnoreCase)
+                    ? DMRES_HIGH
+                    : DMRES_MEDIUM;
+
+                Marshal.StructureToPtr(devMode, info.pDevMode, false);
+                Marshal.StructureToPtr(info, pPrinter, false);
+
+                return SetPrinter(hPrinter, 2, pPrinter, 0);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(pPrinter);
+            }
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            _ = ClosePrinter(hPrinter);
+        }
     }
 }

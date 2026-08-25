@@ -119,6 +119,7 @@ Critical constraints:
 - `SumatraPDF.exe` path comes from `HardwareSettings.SumatraPath` (default `C:\Users\printbit\bin\SumatraPDF.exe`).
 - Printer name comes from `HardwareSettings.PrinterName` and must exactly match Windows registration.
 - Print jobs are serialized via `SemaphoreSlim(1, 1)` inside `PagePrinter`.
+- Before dispatching Sumatra, `PagePrinter` applies the print quality setting (`"high"` -> `DMRES_HIGH` / `-4`, `"standard"` -> `DMRES_MEDIUM` / `-3`) to the printer's `DEVMODE` via WinSpool API `SetPrinter` to ensure the driver prints with the selected resolution/speed.
 - Before dispatching Sumatra, the print job blocks on `WaitForPrinterHealthyAsync` (up to 30 seconds), polling the printer health via the WinSpool API and WMI. If the printer is in a latched hardware error state (like paper-out), it performs a soft-reset via `SetPrinter` (PRINTER_CONTROL_SET_STATUS) and toggles a no-op print job to nudge the driver to clear the latched state.
 - After health recovery, a final pre-flight check using the WinSpool API is executed. If the printer is still unhealthy, the print is failed fast with `PrintFailureStage.HardwareError`.
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
@@ -220,6 +221,7 @@ Dependency direction:
 | `PagePrinter` | Infrastructure | Sumatra process + spooler verification for a single page with a 12-second post-clear guard, patience mode support, and print lock |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 | `JobOrchestrator` | Infrastructure | Orchestrates page-level print sequencing, PDF splitting via qpdf, pre-flight checks, and event emission |
+| `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
 printer-only mode. The DI container hosts only the three printer-related services

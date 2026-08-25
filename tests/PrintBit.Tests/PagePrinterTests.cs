@@ -54,6 +54,7 @@ public class PagePrinterTests
             "PrinterName",
             0,
             false,
+            "standard",
             _ => Task.CompletedTask,
             () => Task.CompletedTask,
             CancellationToken.None);
@@ -91,6 +92,7 @@ public class PagePrinterTests
                 "TestPrinter",
                 0,
                 false,
+                "standard",
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
@@ -141,6 +143,7 @@ public class PagePrinterTests
                 "TestPrinter",
                 0,
                 false,
+                "standard",
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
@@ -187,6 +190,7 @@ public class PagePrinterTests
                 "TestPrinter",
                 0,
                 false,
+                "standard",
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);
@@ -237,6 +241,7 @@ public class PagePrinterTests
                 "TestPrinter",
                 0,
                 false,
+                "standard",
                 _ => Task.CompletedTask,
                 () => Task.CompletedTask,
                 CancellationToken.None);

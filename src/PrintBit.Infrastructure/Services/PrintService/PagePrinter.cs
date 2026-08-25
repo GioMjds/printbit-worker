@@ -32,6 +32,7 @@ public class PagePrinter : IPagePrinter
         string printerName,
         int sequenceIndex,
         bool color,
+        string quality,
         Func<string, Task> onPaused,
         Func<Task> onResumed,
         CancellationToken cancellationToken)
@@ -50,8 +51,19 @@ public class PagePrinter : IPagePrinter
                 return new PagePrintResult { State = PagePrintState.Failed, FailureStage = PrintFailureStage.Validation, ErrorMessage = "SumatraPDF executable not found" };
             }
 
+            // Configure printer driver DEVMODE quality (High vs Standard)
+            try
+            {
+                var qualitySet = WinSpoolApi.SetPrinterQuality(printerName, quality);
+                _logger.LogInformation("Applied printer DEVMODE quality {quality} for {printerName} (success={qualitySet})", quality, printerName, qualitySet);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to set printer quality {quality} for {printerName}", quality, printerName);
+            }
+
             var printSettings = color ? "color" : "monochrome";
-            _logger.LogInformation("Dispatching SumatraPDF for page {filePath} on printer {printerName} (settings={printSettings})", filePath, printerName, printSettings);
+            _logger.LogInformation("Dispatching SumatraPDF for page {filePath} on printer {printerName} (settings={printSettings}, quality={quality})", filePath, printerName, printSettings, quality);
             using var process = new Process
             {
                 StartInfo = new ProcessStartInfo
