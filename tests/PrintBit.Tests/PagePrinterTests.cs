@@ -255,4 +255,63 @@ public class PagePrinterTests
             try { File.Delete(tempPdf); } catch {}
         }
     }
+
+    [Theory]
+    [InlineData(0x20u, "Offline")]
+    [InlineData(0x200u, "Blocked Device Queue")]
+    [InlineData(0x400u, "User Intervention Required")]
+    public async Task PrintPageAsync_ExtendedJobErrors_TriggersPauseCallback(uint statusMask, string jobStatus)
+    {
+        var dummyExe = GetDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var healthMock = new Mock<IPrinterHealthMonitor>();
+            int pollCount = 0;
+            healthMock.Setup(h => h.QueryJobStatus(It.IsAny<string>(), It.IsAny<string>()))
+                      .Returns(() =>
+                      {
+                          pollCount++;
+                          if (pollCount <= 2)
+                          {
+                              return (true, statusMask, jobStatus, 0, 1, "123");
+                          }
+                          // Recovered/cleared
+                          return (false, 0u, "", 1, 1, null);
+                      });
+
+            int errorCode = 0;
+            string errorMessage = "";
+            healthMock.Setup(h => h.HasFatalHardwareError(It.IsAny<string>(), out errorCode, out errorMessage))
+                      .Returns(false);
+
+            bool pausedCalled = false;
+            string pausedReason = "";
+
+            var settings = new HardwareSettings { SumatraPath = dummyExe, PrintTimeoutSeconds = 5, PostClearGuardDelaySeconds = 0 };
+            var sut = new PagePrinter(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<PagePrinter>.Instance,
+                Microsoft.Extensions.Options.Options.Create(settings),
+                healthMock.Object);
+
+            var result = await sut.PrintPageAsync(
+                tempPdf,
+                "TestPrinter",
+                0,
+                false,
+                "standard",
+                onPaused: msg => { pausedCalled = true; pausedReason = msg; return Task.CompletedTask; },
+                onResumed: () => Task.CompletedTask,
+                CancellationToken.None);
+
+            Assert.True(pausedCalled, $"Expected onPaused to be triggered for statusMask 0x{statusMask:X}");
+            Assert.Contains(jobStatus, pausedReason);
+        }
+        finally
+        {
+            try { File.Delete(tempPdf); } catch {}
+        }
+    }
 }

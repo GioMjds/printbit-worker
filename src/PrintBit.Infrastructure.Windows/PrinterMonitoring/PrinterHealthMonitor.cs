@@ -261,16 +261,26 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     {
         var escapedPrinterName = _hardwareSettings.PrinterName.Replace("'", "''");
         using var searcher = new ManagementObjectSearcher(
-            $"SELECT DetectedErrorState, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
+            $"SELECT DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
 
+        bool foundPrinter = false;
         using var results = searcher.Get();
         foreach (ManagementObject printer in results.Cast<ManagementObject>())
         {
+            foundPrinter = true;
             try
             {
                 var isOffline = printer["WorkOffline"] is true;
+                var extStatus = Convert.ToInt32(printer["ExtendedPrinterStatus"] ?? 0);
+                if (extStatus is 7 or 11)
+                {
+                    isOffline = true;
+                }
+
                 var errorStateRaw = printer["DetectedErrorState"]?.ToString() ?? "0";
                 var errorCode = int.TryParse(errorStateRaw, out var c) ? c : 0;
+                var isFatalWmi = IsFatalDetectedErrorState(errorCode);
+                var isFatalExt = IsFatalExtendedPrinterStatus(extStatus) && extStatus is not (7 or 11);
 
                 if (_lastOfflineState != isOffline)
                 {
@@ -285,14 +295,17 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
                 lock (_lock)
                 {
-                    if (errorCode >= 3)
+                    if (isFatalWmi || isFatalExt)
                     {
-                        _fatalErrorCode = errorCode;
-                        _fatalErrorMessage = DetectedErrorStateDescription(errorCode);
+                        _fatalErrorCode = isFatalWmi ? errorCode : extStatus;
+                        _fatalErrorMessage = isFatalWmi
+                            ? DetectedErrorStateDescription(errorCode)
+                            : ExtendedPrinterStatusDescription(extStatus);
 
-                        if (_lastErrorState != errorStateRaw)
+                        var stateIdentifier = $"{errorStateRaw}_{extStatus}";
+                        if (_lastErrorState != stateIdentifier)
                         {
-                            _lastErrorState = errorStateRaw;
+                            _lastErrorState = stateIdentifier;
                             _pendingEvent = new WorkerPrintEvent
                             {
                                 Type = WorkerPrintEventType.PrinterError,
@@ -316,6 +329,25 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             }
         }
 
+        if (!foundPrinter)
+        {
+            if (_lastOfflineState != true)
+            {
+                _lastOfflineState = true;
+                _pendingEvent = new WorkerPrintEvent
+                {
+                    Type = WorkerPrintEventType.PrinterOffline,
+                    PrinterName = _hardwareSettings.PrinterName,
+                    Message = $"Printer queue '{_hardwareSettings.PrinterName}' not found"
+                };
+            }
+            lock (_lock)
+            {
+                _fatalErrorCode = 1;
+                _fatalErrorMessage = $"Printer queue '{_hardwareSettings.PrinterName}' not found";
+            }
+        }
+
         if (_pendingEvent is not null && await _eventPipe.SendAsync(_pendingEvent, stoppingToken))
         {
             _pendingEvent = null;
@@ -325,6 +357,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     private bool IsWmiHealthy(string printerName, out string wmiDesc)
     {
         wmiDesc = "OK";
+        bool foundPrinter = false;
         try
         {
             var escapedPrinterName = printerName.Replace("'", "''");
@@ -334,6 +367,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             using var results = searcher.Get();
             foreach (ManagementObject printer in results.Cast<ManagementObject>())
             {
+                foundPrinter = true;
                 try
                 {
                     if (printer["WorkOffline"] is true)
@@ -341,8 +375,14 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                         wmiDesc = "Offline";
                         return false;
                     }
+                    var extStatus = Convert.ToInt32(printer["ExtendedPrinterStatus"] ?? 0);
+                    if (IsFatalExtendedPrinterStatus(extStatus))
+                    {
+                        wmiDesc = $"Extended status {extStatus} ({ExtendedPrinterStatusDescription(extStatus)})";
+                        return false;
+                    }
                     var err = Convert.ToInt32(printer["DetectedErrorState"] ?? 0);
-                    if (err >= 3)
+                    if (IsFatalDetectedErrorState(err))
                     {
                         wmiDesc = $"Error {err} ({DetectedErrorStateDescription(err)})";
                         return false;
@@ -353,13 +393,65 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                     printer.Dispose();
                 }
             }
+
+            if (!foundPrinter)
+            {
+                wmiDesc = $"Printer queue '{printerName}' not found";
+                return false;
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // best effort
+            _logger.LogWarning(ex, "WMI query failed for {printerName}", printerName);
+            wmiDesc = $"WMI query failed: {ex.Message}";
+            return false;
         }
         return true;
     }
+
+    private static bool IsFatalDetectedErrorState(int code) => code switch
+    {
+        4 => true,  // No Paper
+        6 => true,  // No Toner
+        7 => true,  // Door Open
+        8 => true,  // Jammed
+        9 => true,  // Offline
+        10 => true, // Service Requested
+        11 => true, // Output Bin Full
+        _ => false
+    };
+
+    private static bool IsFatalExtendedPrinterStatus(int status) => status switch
+    {
+        6 => true,  // Stopped Printing
+        7 => true,  // Offline
+        9 => true,  // Error
+        11 => true, // Not Available
+        _ => false
+    };
+
+    private static string ExtendedPrinterStatusDescription(int status) => status switch
+    {
+        1 => "Other",
+        2 => "Unknown",
+        3 => "Idle",
+        4 => "Printing",
+        5 => "Warmup",
+        6 => "Stopped Printing",
+        7 => "Offline",
+        8 => "Paused",
+        9 => "Error",
+        10 => "Busy",
+        11 => "Not Available",
+        12 => "Waiting",
+        13 => "Processing",
+        14 => "Initialization",
+        15 => "Power Save",
+        16 => "Pending Deletion",
+        17 => "I/O Active",
+        18 => "Manual Feed",
+        _ => $"Status ({status})"
+    };
 
     private static string DetectedErrorStateDescription(int code) => code switch
     {

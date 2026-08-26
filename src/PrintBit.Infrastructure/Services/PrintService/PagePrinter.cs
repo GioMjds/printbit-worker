@@ -116,6 +116,13 @@ public class PagePrinter : IPagePrinter
         }
     }
 
+    private const uint JobErrorMask =
+        0x00000002 | // Error
+        0x00000020 | // Offline
+        0x00000040 | // Paper out
+        0x00000200 | // Blocked device queue
+        0x00000400;  // User intervention required
+
     private async Task<PagePrintResult> VerifySpoolerPageLifecycleAsync(
         string printerName,
         string documentName,
@@ -141,8 +148,7 @@ public class PagePrinter : IPagePrinter
                 {
                     lastSpoolerJobId = jobId;
                     
-                    // StatusMask: 0x2 (ERROR), 0x40 (PAPEROUT)
-                    bool jobHasError = (statusMask & (0x2 | 0x40)) != 0;
+                    bool jobHasError = (statusMask & JobErrorMask) != 0;
                     bool fatalMonitorError = _healthMonitor.HasFatalHardwareError(printerName, out _, out var fatalMsg);
                     bool isDeleting = (statusMask & (0x4 | 0x100)) != 0 || jobStatus.Contains("Deleting", StringComparison.OrdinalIgnoreCase);
 
