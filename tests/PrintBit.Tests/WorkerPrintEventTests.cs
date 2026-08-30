@@ -71,11 +71,11 @@ public class WorkerPrintEventTests
     }
 
     [Fact]
-    public void WorkerPrintEvent_SerializesToCamelCase()
+    public void WorkerPrintEvent_TerminalPayloadSerializesPageCountConfidence()
     {
         var evt = new WorkerPrintEvent
         {
-            Type = WorkerPrintEventType.JobCompleted,
+            Type = WorkerPrintEventType.PrintSucceeded,
             TransactionId = "TX-1",
             SpoolerCorrelationKey = "SCK-1",
             Outcome = "partially_completed",
@@ -83,6 +83,7 @@ public class WorkerPrintEventTests
             TotalExpected = 4,
             CancelledCount = 1,
             CompletedCount = 3,
+            PageCountConfidence = "best_effort",
             Pages = new System.Collections.Generic.List<WorkerPrintPageResult>
             {
                 new() { Page = 1, Copy = 1, State = "completed" },
@@ -95,9 +96,10 @@ public class WorkerPrintEventTests
             Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
         });
 
-        Assert.Contains("\"type\":\"JobCompleted\"", json);
+        Assert.Contains("\"type\":\"PrintSucceeded\"", json);
         Assert.Contains("\"transactionId\":\"TX-1\"", json);
         Assert.Contains("\"outcome\":\"partially_completed\"", json);
+        Assert.Contains("\"pageCountConfidence\":\"best_effort\"", json);
         Assert.Contains("\"pages\":[", json);
         Assert.Contains("\"state\":\"completed\"", json);
     }

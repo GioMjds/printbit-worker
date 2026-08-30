@@ -39,6 +39,9 @@ public sealed record WorkerPrintEvent
     [JsonPropertyName("totalPages")]
     public int? TotalPages { get; init; }
 
+    [JsonPropertyName("pageCountConfidence")]
+    public string? PageCountConfidence { get; init; }
+
     [JsonPropertyName("pageNumber")]
     public int? PageNumber { get; init; }
 

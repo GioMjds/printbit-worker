@@ -17,16 +17,18 @@ builder.Services.AddWindowsService(options =>
 
 builder.Services.AddHostedService<ErrorPipeHostedService>();
 
-// Registrations for the new page-level spooler dispatch model
+// Printer monitoring and whole-document spooler dispatch
 builder.Services.AddSingleton<PrinterHealthMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PrinterHealthMonitor>());
 builder.Services.AddSingleton<IPrinterHealthMonitor>(sp => sp.GetRequiredService<PrinterHealthMonitor>());
 
-builder.Services.AddSingleton<IPagePrinter, PagePrinter>();
+builder.Services.AddSingleton<IDocumentPrinter, DocumentPrinter>();
 builder.Services.AddSingleton<IJobOrchestrator, JobOrchestrator>();
 builder.Services.AddHostedService<PrintQueueWatcher>();
 
 builder.Services.AddSingleton<WorkerEventPipeClient>();
+builder.Services.AddSingleton<IWorkerEventPipeClient>(
+    sp => sp.GetRequiredService<WorkerEventPipeClient>());
 
 var host = builder.Build();
 

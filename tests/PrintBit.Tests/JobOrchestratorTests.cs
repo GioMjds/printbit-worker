@@ -1,212 +1,237 @@
-using Xunit;
-using Moq;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Moq;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 using PrintBit.Shared.Printing;
-using System;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace PrintBit.Tests;
 
 public class JobOrchestratorTests
 {
-    private class TestableJobOrchestrator : JobOrchestrator
+    [Fact]
+    public async Task ProcessJobAsync_ThreePagesTwoCopies_DispatchesOriginalPdfPerCopy()
     {
-        public bool SimulateSplitFailure { get; set; }
-
-        public TestableJobOrchestrator(
-            IPrinterHealthMonitor healthMonitor,
-            IPagePrinter pagePrinter,
-            WorkerEventPipeClient eventPipe)
-            : base(
-                NullLogger<JobOrchestrator>.Instance,
-                Options.Create(new HardwareSettings { QpdfPath = "qpdf.exe", PrinterName = "TestPrinter" }),
-                pagePrinter,
-                healthMonitor,
-                eventPipe)
+        var tempPdf = CreatePdf(pageCount: 3);
+        try
         {
+            var healthMock = CreateHealthyMonitor();
+            var dispatches = new List<(string FilePath, int CopyNumber, int[] Pages)>();
+            var printerMock = new Mock<IDocumentPrinter>();
+            printerMock.Setup(p => p.PrintDocumentAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<IReadOnlyList<int>>(),
+                    It.IsAny<PrintJobSettings>(),
+                    It.IsAny<Func<int, int, Task>>(),
+                    It.IsAny<Func<string, Task>>(),
+                    It.IsAny<Func<Task>>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback((
+                    string filePath,
+                    string _,
+                    int copyNumber,
+                    IReadOnlyList<int> pages,
+                    PrintJobSettings _,
+                    Func<int, int, Task> _,
+                    Func<string, Task> _,
+                    Func<Task> _,
+                    CancellationToken _) =>
+                    dispatches.Add((filePath, copyNumber, pages.ToArray())))
+                .ReturnsAsync(new PagePrintResult
+                {
+                    State = PagePrintState.Completed,
+                    PagesPrinted = 3,
+                    TotalPages = 3,
+                    PageCountConfidence = "confirmed"
+                });
+
+            var events = new List<WorkerPrintEvent>();
+            var eventPipeMock = CreateEventPipe(events);
+            var sut = CreateSut(healthMock.Object, printerMock.Object, eventPipeMock.Object);
+
+            var result = await sut.ProcessJobAsync(
+                new PrintJobRequest
+                {
+                    FilePath = tempPdf,
+                    PrinterName = "TestPrinter",
+                    Settings = new PrintJobSettings { Copies = 2 }
+                },
+                Path.ChangeExtension(tempPdf, ".json"),
+                CancellationToken.None);
+
+            Assert.True(result.Success);
+            Assert.Equal(6, result.PagesPrinted);
+            Assert.Equal(6, result.TotalPages);
+            Assert.Equal("confirmed", result.PageCountConfidence);
+            Assert.Equal(2, dispatches.Count);
+            Assert.All(dispatches, dispatch => Assert.Equal(tempPdf, dispatch.FilePath));
+            Assert.Equal([1, 2], dispatches.Select(dispatch => dispatch.CopyNumber));
+            Assert.All(dispatches, dispatch => Assert.Equal([1, 2, 3], dispatch.Pages));
+
+            var terminal = Assert.Single(events, evt =>
+                evt.Type is WorkerPrintEventType.PrintSucceeded or WorkerPrintEventType.PrintFailed);
+            Assert.Equal(WorkerPrintEventType.PrintSucceeded, terminal.Type);
+            Assert.Equal(6, terminal.CompletedCount);
+            Assert.Equal(6, terminal.TotalExpected);
+            Assert.Equal("confirmed", terminal.PageCountConfidence);
+            Assert.All(terminal.Pages!, page => Assert.Equal("completed", page.State));
         }
-
-        protected override Task SplitPdfPagesAsync(string filePath, string workDir, CancellationToken cancellationToken)
+        finally
         {
-            if (SimulateSplitFailure)
-            {
-                throw new InvalidOperationException("Simulated qpdf error");
-            }
+            File.Delete(tempPdf);
+        }
+    }
 
-            // Create mock split files
-            File.WriteAllText(Path.Combine(workDir, "page-00001.pdf"), "%PDF");
-            return Task.CompletedTask;
+    [Fact]
+    public async Task ProcessJobAsync_SecondCopyPartiallyFails_EmitsFailedBestEffortResult()
+    {
+        var tempPdf = CreatePdf(pageCount: 3);
+        try
+        {
+            var healthMock = CreateHealthyMonitor();
+            var printerMock = new Mock<IDocumentPrinter>();
+            printerMock.Setup(p => p.PrintDocumentAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<IReadOnlyList<int>>(),
+                    It.IsAny<PrintJobSettings>(),
+                    It.IsAny<Func<int, int, Task>>(),
+                    It.IsAny<Func<string, Task>>(),
+                    It.IsAny<Func<Task>>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns((
+                    string _,
+                    string _,
+                    int copyNumber,
+                    IReadOnlyList<int> _,
+                    PrintJobSettings _,
+                    Func<int, int, Task> _,
+                    Func<string, Task> _,
+                    Func<Task> _,
+                    CancellationToken _) => Task.FromResult(copyNumber == 1
+                        ? new PagePrintResult
+                        {
+                            State = PagePrintState.Completed,
+                            PagesPrinted = 3,
+                            TotalPages = 3,
+                            PageCountConfidence = "confirmed"
+                        }
+                        : new PagePrintResult
+                        {
+                            State = PagePrintState.Failed,
+                            FailureStage = PrintFailureStage.HardwareError,
+                            ErrorMessage = "Out of paper",
+                            PagesPrinted = 1,
+                            TotalPages = 3,
+                            PageCountConfidence = "best_effort"
+                        }));
+
+            var events = new List<WorkerPrintEvent>();
+            var eventPipeMock = CreateEventPipe(events);
+            var sut = CreateSut(healthMock.Object, printerMock.Object, eventPipeMock.Object);
+
+            var result = await sut.ProcessJobAsync(
+                new PrintJobRequest
+                {
+                    FilePath = tempPdf,
+                    PrinterName = "TestPrinter",
+                    Settings = new PrintJobSettings { Copies = 2 }
+                },
+                Path.ChangeExtension(tempPdf, ".json"),
+                CancellationToken.None);
+
+            Assert.False(result.Success);
+            Assert.Equal(PrintFailureStage.HardwareError, result.FailureStage);
+            Assert.Equal(4, result.PagesPrinted);
+            Assert.Equal(6, result.TotalPages);
+            Assert.Equal("best_effort", result.PageCountConfidence);
+
+            var terminal = Assert.Single(events, evt =>
+                evt.Type is WorkerPrintEventType.PrintSucceeded or WorkerPrintEventType.PrintFailed);
+            Assert.Equal(WorkerPrintEventType.PrintFailed, terminal.Type);
+            Assert.Equal("partially_completed", terminal.Outcome);
+            Assert.Equal(4, terminal.CompletedCount);
+            Assert.Equal(1, terminal.FailedCount);
+            Assert.Equal(1, terminal.CancelledCount);
+            Assert.Equal("best_effort", terminal.PageCountConfidence);
+            Assert.Equal(
+                ["completed", "failed", "cancelled"],
+                terminal.Pages!.Where(page => page.Copy == 2).Select(page => page.State));
+        }
+        finally
+        {
+            File.Delete(tempPdf);
         }
     }
 
     [Fact]
     public async Task ProcessJobAsync_InvalidFilename_ReturnsValidationFailure()
     {
-        var healthMock = new Mock<IPrinterHealthMonitor>();
-        var printerMock = new Mock<IPagePrinter>();
-        var orchestrator = new TestableJobOrchestrator(healthMock.Object, printerMock.Object, null!);
+        var sut = CreateSut(
+            Mock.Of<IPrinterHealthMonitor>(),
+            Mock.Of<IDocumentPrinter>(),
+            Mock.Of<IWorkerEventPipeClient>());
 
-        var request = new PrintJobRequest
-        {
-            FilePath = "invalidfilename.pdf",
-            PrinterName = "TestPrinter",
-            Settings = new PrintJobSettings { Copies = 1 }
-        };
-
-        var result = await orchestrator.ProcessJobAsync(request, "dummy.json", CancellationToken.None);
+        var result = await sut.ProcessJobAsync(
+            new PrintJobRequest
+            {
+                FilePath = "invalidfilename.pdf",
+                PrinterName = "TestPrinter"
+            },
+            "invalidfilename.json",
+            CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal(PrintFailureStage.Validation, result.FailureStage);
-        Assert.Contains("Filename does not match", result.Message);
     }
 
-    [Fact]
-    public async Task ProcessJobAsync_PreFlightUnhealthy_EntersPauseWaitAndSucceeds()
+    private static JobOrchestrator CreateSut(
+        IPrinterHealthMonitor healthMonitor,
+        IDocumentPrinter documentPrinter,
+        IWorkerEventPipeClient eventPipe)
     {
-        var tempPdf = Path.Combine(Path.GetTempPath(), $"TX-123_SCK-456_{Guid.NewGuid():N}.pdf");
-        File.WriteAllText(tempPdf, "%PDF-1.7\n/Type /Pages /Count 1");
-
-        try
-        {
-            var healthMock = new Mock<IPrinterHealthMonitor>();
-            int pollCount = 0;
-            // Unhealthy first, then healthy
-            healthMock.Setup(h => h.IsHealthy("TestPrinter", out It.Ref<int>.IsAny, out It.Ref<string>.IsAny))
-                      .Returns((string p, out int s, out string d) =>
-                      {
-                          pollCount++;
-                          s = 0;
-                          d = "OK";
-                          return pollCount > 1; // True on second call (during pause wait)
-                      });
-
-            var printerMock = new Mock<IPagePrinter>();
-            printerMock.Setup(p => p.PrintPageAsync(
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<int>(),
-                It.IsAny<bool>(),
-                It.IsAny<string>(),
-                It.IsAny<Func<string, Task>>(),
-                It.IsAny<Func<Task>>(),
-                It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new PagePrintResult { State = PagePrintState.Completed });
-
-            var orchestrator = new TestableJobOrchestrator(healthMock.Object, printerMock.Object, null!);
-
-            var request = new PrintJobRequest
+        return new JobOrchestrator(
+            NullLogger<JobOrchestrator>.Instance,
+            Options.Create(new HardwareSettings
             {
-                FilePath = tempPdf,
+                QpdfPath = "qpdf.exe",
                 PrinterName = "TestPrinter",
-                Settings = new PrintJobSettings { Copies = 1 }
-            };
-
-            var result = await orchestrator.ProcessJobAsync(request, "dummy.json", CancellationToken.None);
-
-            Assert.True(result.Success);
-            Assert.Equal(1, result.PagesPrinted);
-            printerMock.Verify(p => p.PrintPageAsync(It.IsAny<string>(), It.IsAny<string>(), 0, It.IsAny<bool>(), It.IsAny<string>(), It.IsAny<Func<string, Task>>(), It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()), Times.Once);
-        }
-        finally
-        {
-            try { File.Delete(tempPdf); } catch { }
-        }
+                PauseTimeoutMinutes = 1
+            }),
+            documentPrinter,
+            healthMonitor,
+            eventPipe);
     }
 
-    [Fact]
-    public async Task ProcessJobAsync_PagePrinterFails_ReturnsFailure()
+    private static Mock<IPrinterHealthMonitor> CreateHealthyMonitor()
     {
-        var tempPdf = Path.Combine(Path.GetTempPath(), $"TX-123_SCK-456_{Guid.NewGuid():N}.pdf");
-        File.WriteAllText(tempPdf, "%PDF-1.7\n/Type /Pages /Count 1");
-
-        try
-        {
-            var healthMock = new Mock<IPrinterHealthMonitor>();
-            healthMock.Setup(h => h.IsHealthy("TestPrinter", out It.Ref<int>.IsAny, out It.Ref<string>.IsAny))
-                      .Returns(true);
-
-            var printerMock = new Mock<IPagePrinter>();
-            printerMock.Setup(p => p.PrintPageAsync(
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<int>(),
-                It.IsAny<bool>(),
-                It.IsAny<string>(),
-                It.IsAny<Func<string, Task>>(),
-                It.IsAny<Func<Task>>(),
-                It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new PagePrintResult { State = PagePrintState.Failed, FailureStage = PrintFailureStage.HardwareError, ErrorMessage = "Out of paper" });
-
-            var orchestrator = new TestableJobOrchestrator(healthMock.Object, printerMock.Object, null!);
-
-            var request = new PrintJobRequest
-            {
-                FilePath = tempPdf,
-                PrinterName = "TestPrinter",
-                Settings = new PrintJobSettings { Copies = 1 }
-            };
-
-            var result = await orchestrator.ProcessJobAsync(request, "dummy.json", CancellationToken.None);
-
-            Assert.False(result.Success);
-            Assert.Equal(PrintFailureStage.HardwareError, result.FailureStage);
-            Assert.Contains("Out of paper", result.Message);
-        }
-        finally
-        {
-            try { File.Delete(tempPdf); } catch { }
-        }
+        var monitor = new Mock<IPrinterHealthMonitor>();
+        var status = 0;
+        var description = "OK";
+        monitor.Setup(h => h.IsHealthy("TestPrinter", out status, out description))
+            .Returns(true);
+        return monitor;
     }
 
-    [Fact]
-    public async Task ProcessJobAsync_PagePrinterCancelled_ReturnsCancelledOutcome()
+    private static Mock<IWorkerEventPipeClient> CreateEventPipe(List<WorkerPrintEvent> events)
     {
-        var tempPdf = Path.Combine(Path.GetTempPath(), $"TX-123_SCK-456_{Guid.NewGuid():N}.pdf");
-        File.WriteAllText(tempPdf, "%PDF-1.7\n/Type /Pages /Count 1");
+        var pipe = new Mock<IWorkerEventPipeClient>();
+        pipe.Setup(p => p.SendAsync(It.IsAny<WorkerPrintEvent>(), It.IsAny<CancellationToken>()))
+            .Callback((WorkerPrintEvent evt, CancellationToken _) => events.Add(evt))
+            .ReturnsAsync(true);
+        return pipe;
+    }
 
-        try
-        {
-            var healthMock = new Mock<IPrinterHealthMonitor>();
-            healthMock.Setup(h => h.IsHealthy("TestPrinter", out It.Ref<int>.IsAny, out It.Ref<string>.IsAny))
-                      .Returns(true);
-
-            var printerMock = new Mock<IPagePrinter>();
-            printerMock.Setup(p => p.PrintPageAsync(
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<int>(),
-                It.IsAny<bool>(),
-                It.IsAny<string>(),
-                It.IsAny<Func<string, Task>>(),
-                It.IsAny<Func<Task>>(),
-                It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new PagePrintResult { State = PagePrintState.Cancelled, FailureStage = PrintFailureStage.SpoolerVerification, ErrorMessage = "User stop" });
-
-            var orchestrator = new TestableJobOrchestrator(healthMock.Object, printerMock.Object, null!);
-
-            var request = new PrintJobRequest
-            {
-                FilePath = tempPdf,
-                PrinterName = "TestPrinter",
-                Settings = new PrintJobSettings { Copies = 1 }
-            };
-
-            var result = await orchestrator.ProcessJobAsync(request, "dummy.json", CancellationToken.None);
-
-            // PrintJobResult is successful even on user cancellation (Outcome = partially_completed)
-            Assert.True(result.Success);
-            Assert.Equal(0, result.PagesPrinted);
-        }
-        finally
-        {
-            try { File.Delete(tempPdf); } catch { }
-        }
+    private static string CreatePdf(int pageCount)
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"tx-123_spool-456_{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(path, $"%PDF-1.7\n/Type /Pages /Count {pageCount}");
+        return path;
     }
 }

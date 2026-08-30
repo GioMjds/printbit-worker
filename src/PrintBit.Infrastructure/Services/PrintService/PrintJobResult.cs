@@ -27,13 +27,16 @@ public class PrintJobResult
 
     public int? TotalPages { get; set; }
 
+    public string PageCountConfidence { get; set; } = "unknown";
+
     public static PrintJobResult Failed(
         PrintFailureStage stage,
         string message,
         int? exitCode = null,
         string? spoolerJobId = null,
         int? pagesPrinted = null,
-        int? totalPages = null)
+        int? totalPages = null,
+        string pageCountConfidence = "unknown")
     {
         return new PrintJobResult
         {
@@ -47,7 +50,8 @@ public class PrintJobResult
             ExitCode = exitCode,
             SpoolerJobId = spoolerJobId,
             PagesPrinted = pagesPrinted,
-            TotalPages = totalPages
+            TotalPages = totalPages,
+            PageCountConfidence = pageCountConfidence
         };
     }
 }

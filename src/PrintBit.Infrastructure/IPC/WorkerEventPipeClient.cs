@@ -8,7 +8,7 @@ using PrintBit.Shared.Configurations;
 
 namespace PrintBit.Infrastructure.IPC;
 
-public sealed class WorkerEventPipeClient
+public sealed class WorkerEventPipeClient : IWorkerEventPipeClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
