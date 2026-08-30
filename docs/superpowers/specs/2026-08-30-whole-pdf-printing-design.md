@@ -39,8 +39,8 @@ The receipt/refund consumer must not interpret `best_effort` as a physical paper
 
 ## Error and Recovery Behavior
 
-- Paper-out, offline, blocked-queue, and user-intervention status flags enter patience mode and emit `JobPaused`.
-- When the same job becomes healthy, it emits `JobResumed` and continues; the worker does not submit a replacement job.
+- Paper-out, offline, blocked-queue, and user-intervention status flags enter patience mode and are logged by the worker.
+- When the same job becomes healthy, it resumes and continues; the worker does not submit a replacement job.
 - A patience timeout cancels the matching spooler job and emits `PrintFailed`.
 - A truncated cleared job, fatal hardware error, process failure, or verification failure emits `PrintFailed` and preserves the source PDF and sidecar in the failed directory.
 - A successful job emits `PrintSucceeded`, after which the queue watcher removes the source PDF and sidecar.
@@ -62,3 +62,5 @@ This retains deterministic logical page completion but causes the unacceptable d
 ## Compatibility and Rollback
 
 No package or external service is added. SumatraPDF already supports page ranges, copies, collation, orientation, and color through `-print-settings`. Rollback is a Git revert to the page-splitting implementation; no data migration is required.
+
+The Node return-pipe consumer currently recognizes only `PrintStarted`, terminal print events, and printer status events. Intermediate progress and pause state remain internal so they cannot be misclassified as `PrintFailed` by the receipt/refund lifecycle.

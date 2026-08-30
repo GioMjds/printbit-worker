@@ -109,31 +109,34 @@ Defined in `Esp32Command`:
 
 ### Epson L5290 Print Dispatch
 
-`PagePrinter` runs:
+`DocumentPrinter` submits the original PDF once per requested copy:
 
 ```
-SumatraPDF.exe -print-to "<printerName>" -print-settings "<color|monochrome>" -silent "<filePath>"
+SumatraPDF.exe -print-to "<printerName>" -print-settings "1x,<color|monochrome>,<pages>[,<orientation>],collate" -silent "<filePath>"
 ```
 
 Critical constraints:
 - `SumatraPDF.exe` path comes from `HardwareSettings.SumatraPath` (default `C:\Users\printbit\bin\SumatraPDF.exe`).
 - Printer name comes from `HardwareSettings.PrinterName` and must exactly match Windows registration.
-- Print jobs are serialized via `SemaphoreSlim(1, 1)` inside `PagePrinter`.
-- Before dispatching Sumatra, `PagePrinter` applies the print quality setting (`"high"` -> `DMRES_HIGH` / `-4`, `"standard"` -> `DMRES_MEDIUM` / `-3`) to the printer's `DEVMODE` via WinSpool API `SetPrinter` to ensure the driver prints with the selected resolution/speed.
-- Before dispatching Sumatra, the print job blocks on `WaitForPrinterHealthyAsync` (up to 30 seconds), polling the printer health via the WinSpool API and WMI. If the printer is in a latched hardware error state (like paper-out), it performs a soft-reset via `SetPrinter` (PRINTER_CONTROL_SET_STATUS) and toggles a no-op print job to nudge the driver to clear the latched state.
-- After health recovery, a final pre-flight check using the WinSpool API is executed. If the printer is still unhealthy, the print is failed fast with `PrintFailureStage.HardwareError`.
+- Each copy is a separate spooler job; pages within a copy are not split into derivative PDFs.
+- Page ranges, color, orientation, and collation are passed through Sumatra's `-print-settings` argument.
+- Print jobs are serialized via `SemaphoreSlim(1, 1)` inside `DocumentPrinter`.
+- Before each copy, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy` to return true.
+- Before dispatching Sumatra, `DocumentPrinter` applies the print quality setting (`"high"` -> `DMRES_HIGH` / `-4`, `"standard"` -> `DMRES_MEDIUM` / `-3`) to the printer's `DEVMODE` via WinSpool API `SetPrinter`.
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
-- Spooler verification inspects `Win32_PrintJob.StatusMask` for `ERROR` (`0x2`) and `PAPEROUT` (`0x40`) flags, and checks `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3: Low Paper, No Paper, Low Toner, No Toner, Door Open, Jammed, Offline, Service Requested, Output Bin Full).
-- Spooler verification also reads `Win32_PrintJob.PagesPrinted` vs `TotalPages`. If `PagesPrinted < TotalPages` for `IncompleteOutputStallSeconds` (3 s default), the job is failed with `PrintFailureStage.IncompleteOutput` (paper-out, jam, tray-empty, partial print). This is the primary signal that catches the "Status=Printed but page never came out" race.
-- The expected page count is computed up front by `PdfPageCounter` (parses the PDF's `/Type /Pages /Count` entry with fallback to `qpdf --show-npages` for compressed streams). If the count is unknown, verification falls back to the spooler's `TotalPages` only.
-- After a spooler job clears, `PagePrinter` keeps a 12-second post-clear hardware guard window to catch delayed Epson popup / monitor hardware signals before returning success.
+- Spooler verification inspects `Win32_PrintJob.StatusMask` for error, offline, paper-out, blocked-queue, and user-intervention flags, and checks `PrinterHealthMonitor` for fatal hardware errors.
+- A spooler or hardware error pauses the same job for up to `PauseTimeoutMinutes`; recovery resumes it without submitting a replacement job.
+- The expected page count is computed up front by `PdfPageCounter`, which parses the original PDF and falls back to `qpdf --show-npages` for compressed streams. qpdf is not used to split pages.
+- `Win32_PrintJob.PagesPrinted` is captured as best-effort progress. It may remain zero or lag behind physical output.
+- When a cleared job's last positive `TotalPages` is lower than the selected-page count, verification fails with `PrintFailureStage.IncompleteOutput`.
+- After each whole-document copy clears, `DocumentPrinter` keeps the configured 12-second post-clear hardware guard window before returning success.
 - Page counts from WMI are unreliable and can lag behind job completion. If the job has cleared and the printer is completely healthy, the print is treated as a success even if the last polled page count was less than expected, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated or aborted job).
 - `PrinterHealthMonitor` now treats `DetectedErrorState` as fatal only when code ≥ 3 and exposes this status via `IsHealthy` and `HasFatalHardwareError`.
 - Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
 - Any process or verification failure returns `Success = false` with stage detail.
 - When verification fails, any matching print jobs in the Windows spooler queue are automatically cancelled/deleted via WMI to clear the printer's hardware queue and prevent subsequent jobs from being blocked.
-- `PrintQueueWatcher` processes print jobs page-by-page by invoking `JobOrchestrator`. It cleans up the sidecar files upon success or moves them to `failed/` if processing fails.
+- `JobOrchestrator` emits `PrintSucceeded` only after every requested copy completes. Partial or terminal failures emit `PrintFailed` with page/copy results and move the source PDF and sidecar to `failed/`.
 
 ### Named Pipe (Node Error Intake)
 
@@ -162,6 +165,10 @@ Critical constraints:
 | `printerName` | No | Printer display name |
 | `failureStage` | No | `PrintFailureStage` string when failed; `hardware_error` for `PrinterError` |
 | `message` | No | Success summary or failure detail |
+| `pagesPrinted` | No | Completed logical pages across copies; best effort on failure |
+| `totalPages` | No | Total selected pages across copies on terminal events |
+| `pageCountConfidence` | No | `confirmed`, `best_effort`, or `unknown` |
+| `pages` | No | Per-page/copy terminal states (`completed`, `failed`, or `cancelled`) |
 | `timestampUtc` | Yes | ISO-8601 timestamp |
 
 Printer monitor events use the same line-delimited JSON pipe. `PrinterError`
@@ -218,9 +225,9 @@ Dependency direction:
 | `PrintQueueWatcher` | HardwareService | Watches queue directory, delegates to `IJobOrchestrator`, and cleans up sidecar files |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
 | `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, and recovery routines |
-| `PagePrinter` | Infrastructure | Sumatra process + spooler verification for a single page with a 12-second post-clear guard, patience mode support, and print lock |
+| `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
-| `JobOrchestrator` | Infrastructure | Orchestrates page-level print sequencing, PDF splitting via qpdf, pre-flight checks, and event emission |
+| `JobOrchestrator` | Infrastructure | Counts and selects pages, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
@@ -243,11 +250,13 @@ builder.Services.AddSingleton<PrinterHealthMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PrinterHealthMonitor>());
 builder.Services.AddSingleton<IPrinterHealthMonitor>(sp => sp.GetRequiredService<PrinterHealthMonitor>());
 
-builder.Services.AddSingleton<IPagePrinter, PagePrinter>();
+builder.Services.AddSingleton<IDocumentPrinter, DocumentPrinter>();
 builder.Services.AddSingleton<IJobOrchestrator, JobOrchestrator>();
 builder.Services.AddHostedService<PrintQueueWatcher>();
 
 builder.Services.AddSingleton<WorkerEventPipeClient>();
+builder.Services.AddSingleton<IWorkerEventPipeClient>(
+    sp => sp.GetRequiredService<WorkerEventPipeClient>());
 ```
 
 ### Configuration
@@ -265,8 +274,8 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "FailedDirectory": "C:\\Users\\printbit\\printbit-worker\\failed",
     "SumatraPath": "C:\\Users\\printbit\\bin\\SumatraPDF.exe",
     "QpdfPath": "C:\\Program Files\\qpdf 12.3.2\\bin\\qpdf.exe",
-    "PdfSplitTimeoutSeconds": 30,
-    "PauseTimeoutMinutes": 15
+    "PauseTimeoutMinutes": 15,
+    "PostClearGuardDelaySeconds": 12
   },
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
@@ -330,13 +339,13 @@ Reset() from any state -> Idle
 - Add values to `Esp32MessageType` and update parser/docs.
 - Add `Esp32Command` constants and update docs.
 - Extend active non-stub classes.
-- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, print verification behavior, and printer pre-flight/recovery status checking.
+- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, whole-document dispatch, page-count confidence, print verification behavior, and printer pre-flight/recovery status checking.
 - Add new `IOptions<T>` config models in `PrintBit.Shared`.
 - Extend `HardwareSettings` and sync docs.
 
 ### Agent MUST NOT
 
-- Remove or bypass `SemaphoreSlim(1, 1)` in `PrintService`.
+- Remove or bypass `SemaphoreSlim(1, 1)` in `DocumentPrinter`.
 - Reduce the 2-minute print timeout.
 - Hardcode serial settings, printer name, or paths when config is available.
 - Register hardware services as scoped/transient.
@@ -420,15 +429,18 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 
 - Sumatra cold-start may take 15-30 seconds.
 - Exact printer-name matching is required.
-- Print execution is single-job serialized (`SemaphoreSlim(1, 1)`).
+- The original PDF is submitted once per requested copy; pages are not split into separate files.
+- Page range, color, orientation, and collation are passed directly to SumatraPDF.
+- Print execution is single-job serialized (`SemaphoreSlim(1, 1)` in `DocumentPrinter`).
 - Success requires both process success and spooler lifecycle verification.
-- Spooler verification checks `Win32_PrintJob.StatusMask` for error/paperout flags and `Win32_Printer.DetectedErrorState` for hardware errors (codes ≥ 3). Hardware errors return `PrintFailureStage.HardwareError` without triggering recovery.
+- Spooler verification checks `Win32_PrintJob.StatusMask` for error, offline, paper-out, blocked-queue, and user-intervention flags and checks `PrinterHealthMonitor` for fatal hardware errors. Hardware errors return `PrintFailureStage.HardwareError` without triggering spooler recovery.
 - Upon any spooler verification failure, matching print jobs are programmatically cancelled from the Windows spooler queue (via WMI) to ensure the printer queue remains clean.
-- `PrintService` enforces a 12-second post-clear guard window before success to detect delayed Epson popup/hardware faults.
+- `DocumentPrinter` enforces one configured 12-second post-clear guard window per whole-document copy to detect delayed Epson popup/hardware faults.
 - If the spooler job clears and the printer is completely healthy (no error reported via WMI, Epson popups, or direct WinSpool checks), the print is treated as a success regardless of WMI page count reporting lag, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated/aborted job).
-- Before print dispatch, `PrintService` invokes `WaitForPrinterHealthyAsync` to poll (and nudge using WinSpool commands and no-op jobs) the printer to clear any latched hardware states like W-01 (paper-out). It then performs a pre-flight WinSpool check to fail-fast with `HardwareError` if the printer remains unhealthy.
-- `PrinterMonitorService` reports only fatal `DetectedErrorState` codes (≥ 3) to Node.js as `PrinterError` and to in-flight print attempts via `IPrintHealthCoordinator`.
-- Queue watcher print requests go directly to `PrintService` (no transaction gate).
+- `Win32_PrintJob.PagesPrinted` is best-effort telemetry, not proof that a sheet physically exited. Terminal events label the count `confirmed`, `best_effort`, or `unknown`.
+- Before each copy, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy`; an in-flight job with recoverable status flags remains in the spooler and resumes after health returns.
+- `PrinterHealthMonitor` reports fatal `DetectedErrorState` codes (≥ 3) to Node.js as `PrinterError` and exposes them to in-flight print verification.
+- Queue watcher requests go directly to `JobOrchestrator` (no transaction gate).
 
 ### State Machine
 
@@ -454,6 +466,7 @@ Before closing any task, diff what changed against this file and update stale se
 | Stub promoted to implementation | Section 5 stub list |
 | New stub added | Section 5 stub list |
 | Print timeout/semaphore/arguments changed | Sections 2 and 6 |
+| Print dispatch granularity or page-count confidence changed | Sections 2, 3, and 6 |
 | Serial defaults/framing changed | Section 2 serial connection |
 | `appsettings` keys changed | Section 3 configuration |
 | New tests documenting behavior | Section 5 Agent MAY |
