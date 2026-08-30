@@ -1,18 +1,16 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
 using PrintBit.Shared.Printing;
 
 namespace PrintBit.Infrastructure.Services.PrintService;
 
-public interface IPagePrinter
+public interface IDocumentPrinter
 {
-    Task<PagePrintResult> PrintPageAsync(
+    Task<DocumentPrintResult> PrintDocumentAsync(
         string filePath,
         string printerName,
-        int sequenceIndex,
-        bool color,
-        string quality,
+        int copyNumber,
+        IReadOnlyList<int> pages,
+        PrintJobSettings settings,
+        Func<int, int, Task> onProgress,
         Func<string, Task> onPaused,
         Func<Task> onResumed,
         CancellationToken cancellationToken);

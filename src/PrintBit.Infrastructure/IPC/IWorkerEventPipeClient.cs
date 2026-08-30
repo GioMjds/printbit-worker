@@ -1,11 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+namespace PrintBit.Infrastructure.IPC;
 
-namespace PrintBit.Infrastructure.IPC
+public interface IWorkerEventPipeClient
 {
-    public sealed class IWorkerEventPipeClient
-    {
-
-    }
+    Task<bool> SendAsync(
+        WorkerPrintEvent evt,
+        CancellationToken cancellationToken = default);
 }

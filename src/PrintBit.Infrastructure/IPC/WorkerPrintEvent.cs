@@ -39,29 +39,11 @@ public sealed record WorkerPrintEvent
     [JsonPropertyName("totalPages")]
     public int? TotalPages { get; init; }
 
-    [JsonPropertyName("pageNumber")]
-    public int? PageNumber { get; init; }
-
-    [JsonPropertyName("copyNumber")]
-    public int? CopyNumber { get; init; }
-
-    [JsonPropertyName("failedPageNumber")]
-    public int? FailedPageNumber { get; init; }
-
-    [JsonPropertyName("failedCopyNumber")]
-    public int? FailedCopyNumber { get; init; }
-
-    [JsonPropertyName("resumingPageNumber")]
-    public int? ResumingPageNumber { get; init; }
-
-    [JsonPropertyName("resumingCopyNumber")]
-    public int? ResumingCopyNumber { get; init; }
+    [JsonPropertyName("pageCountConfidence")]
+    public string? PageCountConfidence { get; init; }
 
     [JsonPropertyName("completedCount")]
     public int? CompletedCount { get; init; }
-
-    [JsonPropertyName("totalCount")]
-    public int? TotalCount { get; init; }
 
     [JsonPropertyName("outcome")]
     public string? Outcome { get; init; }
@@ -87,6 +69,4 @@ public sealed record WorkerPrintEvent
     [JsonPropertyName("completedAt")]
     public DateTime? CompletedAt { get; init; }
 
-    [JsonPropertyName("errorMessage")]
-    public string? ErrorMessage { get; init; }
 }
