@@ -32,20 +32,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     private int _fatalErrorCode = 0;
     private string _fatalErrorMessage = string.Empty;
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr LoadLibrary(string libname);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
-    private delegate int PrGetStatusCodeDelegate(string printerName, ref int statusCode);
-
-    private static IntPtr _epsonDllHandle = IntPtr.Zero;
-    private static PrGetStatusCodeDelegate? _prGetStatusCode = null;
-    private static readonly object _epsonInitLock = new();
-    private static bool _epsonInitialized = false;
-
     // Win32 APIs for Epson Status Monitor Popup checking
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern bool IsWindowVisible(IntPtr hWnd);
@@ -79,71 +65,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         _eventPipe = eventPipe;
     }
 
-    private static void EnsureEpsonApiInitialized()
-    {
-        if (_epsonInitialized) return;
-        lock (_epsonInitLock)
-        {
-            if (_epsonInitialized) return;
-            try
-            {
-                var driverDir = System.IO.Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.System),
-                    "spool", "drivers", "x64", "3");
-                var primaryDll = System.IO.Path.Combine(driverDir, "E_YAPRYRE.DLL");
-                if (System.IO.File.Exists(primaryDll))
-                {
-                    _epsonDllHandle = LoadLibrary(primaryDll);
-                    if (_epsonDllHandle != IntPtr.Zero)
-                    {
-                        var proc = GetProcAddress(_epsonDllHandle, "PrGetStatusCode");
-                        if (proc != IntPtr.Zero)
-                        {
-                            _prGetStatusCode = Marshal.GetDelegateForFunctionPointer<PrGetStatusCodeDelegate>(proc);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-                // Ignore initialization failures
-            }
-            finally
-            {
-                _epsonInitialized = true;
-            }
-        }
-    }
-
-    public static bool TryGetEpsonDriverStatusCode(string printerName, out int statusCode, out string description)
-    {
-        statusCode = 0;
-        description = "Ready";
-        EnsureEpsonApiInitialized();
-
-        if (_prGetStatusCode == null)
-        {
-            return false;
-        }
-
-        try
-        {
-            int rawCode = 0;
-            int ret = _prGetStatusCode(printerName, ref rawCode);
-            if (ret == 1)
-            {
-                statusCode = rawCode & 0xFF;
-                description = DetectedErrorStateDescription(statusCode);
-                return true;
-            }
-            return false;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     public virtual bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc)
     {
         var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var status, out winSpoolDesc);
@@ -152,18 +73,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         var wmiHealthy = IsWmiHealthy(printerName, out _);
         var (hasPopup, _, _, _) = CheckEpsonStatusMonitorPopup(printerName);
 
-        bool epsonHealthy = true;
-        if (TryGetEpsonDriverStatusCode(printerName, out var epsonCode, out var epsonDesc))
-        {
-            if (IsFatalDetectedErrorState(epsonCode))
-            {
-                epsonHealthy = false;
-                winSpoolStatus = epsonCode;
-                winSpoolDesc = $"Epson hardware status: {epsonDesc}";
-            }
-        }
-
-        return wsHealthy && wmiHealthy && !hasPopup && epsonHealthy;
+        return wsHealthy && wmiHealthy && !hasPopup;
     }
 
     public bool HasFatalHardwareError(string printerName, out int errorCode, out string errorMessage)
@@ -179,13 +89,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                     return true;
                 }
             }
-        }
-
-        if (TryGetEpsonDriverStatusCode(printerName, out var epsonCode, out var epsonDesc) && IsFatalDetectedErrorState(epsonCode))
-        {
-            errorCode = epsonCode;
-            errorMessage = $"Epson hardware status: {epsonDesc}";
-            return true;
         }
 
         var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var winSpoolStatus, out var winSpoolDesc);
@@ -251,7 +154,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         {
             _logger.LogWarning("Executing printer recovery spooler restarts...");
             KillProcess("SumatraPDF");
-            KillEpsonProcesses();
+            KillProcess("E_YARNYRE");
             await RestartSpoolerAsync();
         }
         catch (Exception ex)
@@ -379,14 +282,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                 var isFatalWmi = IsFatalDetectedErrorState(errorCode);
                 var isFatalExt = IsFatalExtendedPrinterStatus(extStatus) && extStatus is not (7 or 11);
 
-                int epsonStatusCode = 0;
-                string epsonStatusDesc = string.Empty;
-                bool isFatalEpson = false;
-                if (TryGetEpsonDriverStatusCode(_hardwareSettings.PrinterName, out epsonStatusCode, out epsonStatusDesc))
-                {
-                    isFatalEpson = IsFatalDetectedErrorState(epsonStatusCode);
-                }
-
                 if (_lastOfflineState != isOffline)
                 {
                     _lastOfflineState = isOffline;
@@ -400,14 +295,14 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
                 lock (_lock)
                 {
-                    if (isFatalEpson || isFatalWmi || isFatalExt)
+                    if (isFatalWmi || isFatalExt)
                     {
-                        _fatalErrorCode = isFatalEpson ? epsonStatusCode : (isFatalWmi ? errorCode : extStatus);
-                        _fatalErrorMessage = isFatalEpson
-                            ? epsonStatusDesc
-                            : (isFatalWmi ? DetectedErrorStateDescription(errorCode) : ExtendedPrinterStatusDescription(extStatus));
+                        _fatalErrorCode = isFatalWmi ? errorCode : extStatus;
+                        _fatalErrorMessage = isFatalWmi
+                            ? DetectedErrorStateDescription(errorCode)
+                            : ExtendedPrinterStatusDescription(extStatus);
 
-                        var stateIdentifier = $"{_fatalErrorCode}_{_fatalErrorMessage}";
+                        var stateIdentifier = $"{errorStateRaw}_{extStatus}";
                         if (_lastErrorState != stateIdentifier)
                         {
                             _lastErrorState = stateIdentifier;
@@ -659,15 +554,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             {
                 try { p.Kill(true); } catch { }
             }
-        }
-    }
-
-    private void KillEpsonProcesses()
-    {
-        string[] epsonExes = { "E_YATIYRE", "E_YARNYRE", "E_S11RPB", "E_YBCSYRE" };
-        foreach (var name in epsonExes)
-        {
-            KillProcess(name);
         }
     }
 

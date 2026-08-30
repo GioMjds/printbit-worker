@@ -87,20 +87,4 @@ public class PrinterHealthMonitorTests
         Assert.True(result);
         Assert.Equal(1, monitor.IsHealthyCallCount);
     }
-
-    [Theory]
-    [InlineData(0, "Ready")]
-    [InlineData(3, "Low Paper")]
-    [InlineData(4, "No Paper")]
-    [InlineData(6, "No Toner")]
-    [InlineData(7, "Door Open")]
-    [InlineData(8, "Jammed")]
-    [InlineData(9, "Offline")]
-    public void TryGetEpsonDriverStatusCode_HandlesNonExistentOrSimulatedCodes(int code, string expectedDescription)
-    {
-        // For non-existent printer or test environments, verify description mapping
-        var desc = PrinterHealthMonitor.TryGetEpsonDriverStatusCode("NonExistentPrinter12345", out var statusCode, out var description);
-        // Even if driver DLL not loaded, the method returns false safely without throwing
-        Assert.NotNull(description);
-    }
 }
