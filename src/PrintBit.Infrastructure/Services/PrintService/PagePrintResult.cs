@@ -8,4 +8,10 @@ public class PagePrintResult
     public string? ErrorMessage { get; set; }
     public string? SpoolerJobId { get; set; }
     public PrintFailureStage FailureStage { get; set; }
+
+    public int PagesPrinted { get; set; }
+
+    public int TotalPages { get; set; }
+
+    public string PageCountConfidence { get; set; } = "unknown";
 }
