@@ -86,7 +86,7 @@ public sealed class JobOrchestrator : IJobOrchestrator
         PrintFailureStage failureStage = PrintFailureStage.None;
         string? failureMessage = null;
         string? spoolerJobId = null;
-        var failureConfidence = "unknown";
+        var failureConfidence = PrintPageCountConfidence.Unknown;
 
         for (var copyNumber = 1; copyNumber <= totalCopies; copyNumber++)
         {
@@ -99,10 +99,7 @@ public sealed class JobOrchestrator : IJobOrchestrator
             if (!_healthMonitor.IsHealthy(request.PrinterName, out _, out _) &&
                 !await WaitForPreFlightHealthAsync(
                     request,
-                    transactionId,
-                    spoolerCorrelationKey,
                     copyEntries[0],
-                    manifest,
                     cancellationToken))
             {
                 copyEntries[0].State = PagePrintState.Failed;
@@ -126,46 +123,38 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 copyNumber,
                 pagesToPrint,
                 request.Settings,
-                async (printed, _) => await MarkProgressAsync(
-                    transactionId,
-                    spoolerCorrelationKey,
-                    copyEntries,
-                    manifest,
-                    printed,
-                    cancellationToken),
-                async error => await EmitJobPausedAsync(
-                    transactionId,
-                    spoolerCorrelationKey,
-                    GetActiveEntry(copyEntries),
-                    manifest,
-                    error,
-                    cancellationToken),
-                async () => await EmitJobResumedAsync(
-                    transactionId,
-                    spoolerCorrelationKey,
-                    GetActiveEntry(copyEntries),
-                    manifest,
-                    cancellationToken),
+                (printed, _) =>
+                {
+                    MarkProgress(copyEntries, printed);
+                    return Task.CompletedTask;
+                },
+                error =>
+                {
+                    var activeEntry = GetActiveEntry(copyEntries);
+                    _logger.LogWarning(
+                        "Whole-document copy {copyNumber} paused at page {pageNumber}: {error}",
+                        activeEntry.CopyNumber,
+                        activeEntry.PageNumber,
+                        error);
+                    return Task.CompletedTask;
+                },
+                () =>
+                {
+                    var activeEntry = GetActiveEntry(copyEntries);
+                    _logger.LogInformation(
+                        "Whole-document copy {copyNumber} resumed at page {pageNumber}",
+                        activeEntry.CopyNumber,
+                        activeEntry.PageNumber);
+                    return Task.CompletedTask;
+                },
                 cancellationToken);
 
             spoolerJobId = result.SpoolerJobId ?? spoolerJobId;
-            await MarkProgressAsync(
-                transactionId,
-                spoolerCorrelationKey,
-                copyEntries,
-                manifest,
-                result.PagesPrinted,
-                cancellationToken);
+            MarkProgress(copyEntries, result.PagesPrinted);
 
             if (result.State == PagePrintState.Completed)
             {
-                await MarkProgressAsync(
-                    transactionId,
-                    spoolerCorrelationKey,
-                    copyEntries,
-                    manifest,
-                    copyEntries.Count,
-                    cancellationToken);
+                MarkProgress(copyEntries, copyEntries.Count);
                 continue;
             }
 
@@ -197,7 +186,9 @@ public sealed class JobOrchestrator : IJobOrchestrator
             : completedCount > 0
                 ? "partially_completed"
                 : "failed";
-        var pageCountConfidence = fullyCompleted ? "confirmed" : failureConfidence;
+        var pageCountConfidence = fullyCompleted
+            ? PrintPageCountConfidence.Confirmed
+            : failureConfidence;
 
         var terminalEvent = new WorkerPrintEvent
         {
@@ -256,17 +247,13 @@ public sealed class JobOrchestrator : IJobOrchestrator
             SpoolerPrinterName = request.PrinterName,
             PagesPrinted = completedCount,
             TotalPages = manifest.Count,
-            PageCountConfidence = "confirmed"
+            PageCountConfidence = PrintPageCountConfidence.Confirmed
         };
     }
 
-    private async Task MarkProgressAsync(
-        string? transactionId,
-        string? spoolerCorrelationKey,
+    private static void MarkProgress(
         IReadOnlyList<PagePrintEntry> copyEntries,
-        IReadOnlyList<PagePrintEntry> manifest,
-        int printedWithinCopy,
-        CancellationToken cancellationToken)
+        int printedWithinCopy)
     {
         var completedWithinCopy = Math.Clamp(
             printedWithinCopy,
@@ -280,36 +267,18 @@ public sealed class JobOrchestrator : IJobOrchestrator
 
             entry.State = PagePrintState.Completed;
             entry.CompletedAt = DateTime.UtcNow;
-            await SendEventAsync(new WorkerPrintEvent
-            {
-                Type = WorkerPrintEventType.PrintProgress,
-                TransactionId = transactionId,
-                SpoolerCorrelationKey = spoolerCorrelationKey,
-                PageNumber = entry.PageNumber,
-                CopyNumber = entry.CopyNumber,
-                CompletedCount = manifest.Count(item =>
-                    item.State == PagePrintState.Completed),
-                TotalCount = manifest.Count,
-                TimestampUtc = DateTime.UtcNow
-            }, cancellationToken);
         }
     }
 
     private async Task<bool> WaitForPreFlightHealthAsync(
         PrintJobRequest request,
-        string? transactionId,
-        string? spoolerCorrelationKey,
         PagePrintEntry entry,
-        IReadOnlyList<PagePrintEntry> manifest,
         CancellationToken cancellationToken)
     {
-        await EmitJobPausedAsync(
-            transactionId,
-            spoolerCorrelationKey,
-            entry,
-            manifest,
-            "Printer unhealthy before document dispatch",
-            cancellationToken);
+        _logger.LogWarning(
+            "Whole-document copy {copyNumber} waiting for printer health before page {pageNumber}",
+            entry.CopyNumber,
+            entry.PageNumber);
 
         var deadline = DateTime.UtcNow.AddMinutes(_settings.PauseTimeoutMinutes);
         while (DateTime.UtcNow < deadline)
@@ -319,61 +288,14 @@ public sealed class JobOrchestrator : IJobOrchestrator
 
             if (_healthMonitor.IsHealthy(request.PrinterName, out _, out _))
             {
-                await EmitJobResumedAsync(
-                    transactionId,
-                    spoolerCorrelationKey,
-                    entry,
-                    manifest,
-                    cancellationToken);
+                _logger.LogInformation(
+                    "Printer recovered before whole-document copy {copyNumber}",
+                    entry.CopyNumber);
                 return true;
             }
         }
 
         return false;
-    }
-
-    private async Task EmitJobPausedAsync(
-        string? transactionId,
-        string? spoolerCorrelationKey,
-        PagePrintEntry entry,
-        IReadOnlyList<PagePrintEntry> manifest,
-        string reason,
-        CancellationToken cancellationToken)
-    {
-        await SendEventAsync(new WorkerPrintEvent
-        {
-            Type = WorkerPrintEventType.JobPaused,
-            TransactionId = transactionId,
-            SpoolerCorrelationKey = spoolerCorrelationKey,
-            FailedPageNumber = entry.PageNumber,
-            FailedCopyNumber = entry.CopyNumber,
-            CompletedCount = manifest.Count(item =>
-                item.State == PagePrintState.Completed),
-            TotalCount = manifest.Count,
-            ErrorMessage = reason,
-            TimestampUtc = DateTime.UtcNow
-        }, cancellationToken);
-    }
-
-    private async Task EmitJobResumedAsync(
-        string? transactionId,
-        string? spoolerCorrelationKey,
-        PagePrintEntry entry,
-        IReadOnlyList<PagePrintEntry> manifest,
-        CancellationToken cancellationToken)
-    {
-        await SendEventAsync(new WorkerPrintEvent
-        {
-            Type = WorkerPrintEventType.JobResumed,
-            TransactionId = transactionId,
-            SpoolerCorrelationKey = spoolerCorrelationKey,
-            ResumingPageNumber = entry.PageNumber,
-            ResumingCopyNumber = entry.CopyNumber,
-            CompletedCount = manifest.Count(item =>
-                item.State == PagePrintState.Completed),
-            TotalCount = manifest.Count,
-            TimestampUtc = DateTime.UtcNow
-        }, cancellationToken);
     }
 
     private Task SendEventAsync(

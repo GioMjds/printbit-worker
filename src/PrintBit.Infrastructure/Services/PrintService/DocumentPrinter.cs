@@ -30,7 +30,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
         _healthMonitor = healthMonitor;
     }
 
-    public async Task<PagePrintResult> PrintDocumentAsync(
+    public async Task<DocumentPrintResult> PrintDocumentAsync(
         string filePath,
         string printerName,
         int copyNumber,
@@ -167,7 +167,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
         return new Process { StartInfo = startInfo };
     }
 
-    private async Task<PagePrintResult> VerifySpoolerDocumentLifecycleAsync(
+    private async Task<DocumentPrintResult> VerifySpoolerDocumentLifecycleAsync(
         string printerName,
         string documentName,
         int expectedPages,
@@ -183,6 +183,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
         var maxPagesPrinted = 0;
         var lastTotalPages = 0;
         string? lastSpoolerJobId = null;
+        string? activeErrorMessage = null;
 
         try
         {
@@ -220,24 +221,35 @@ public sealed class DocumentPrinter : IDocumentPrinter
 
                     if (jobHasError || fatalMonitorError)
                     {
+                        activeErrorMessage = fatalMonitorError
+                            ? fatalMessage
+                            : $"Spooler error status: {jobStatus} (0x{statusMask:X})";
                         if (!inPatienceMode)
                         {
                             inPatienceMode = true;
-                            var errorMessage = fatalMonitorError
-                                ? fatalMessage
-                                : $"Spooler error status: {jobStatus} (0x{statusMask:X})";
-                            await onPaused(errorMessage);
+                            await onPaused(activeErrorMessage);
                         }
                     }
                     else if (inPatienceMode)
                     {
                         inPatienceMode = false;
+                        activeErrorMessage = null;
                         await onResumed();
                         deadline = DateTime.UtcNow.AddSeconds(45);
                     }
                 }
                 else
                 {
+                    if (inPatienceMode)
+                    {
+                        return Failed(
+                            PrintFailureStage.HardwareError,
+                            $"Spooler job disappeared while printer remained in error: {activeErrorMessage}",
+                            expectedPages,
+                            maxPagesPrinted,
+                            lastSpoolerJobId);
+                    }
+
                     if (observedActive)
                     {
                         if (lastTotalPages > 0 && lastTotalPages < expectedPages)
@@ -375,45 +387,49 @@ public sealed class DocumentPrinter : IDocumentPrinter
         return string.Join(',', ranges);
     }
 
-    private static PagePrintResult Completed(int expectedPages, string? spoolerJobId) => new()
+    private static DocumentPrintResult Completed(int expectedPages, string? spoolerJobId) => new()
     {
         State = PagePrintState.Completed,
         FailureStage = PrintFailureStage.None,
         SpoolerJobId = spoolerJobId,
         PagesPrinted = expectedPages,
         TotalPages = expectedPages,
-        PageCountConfidence = "confirmed"
+        PageCountConfidence = PrintPageCountConfidence.Confirmed
     };
 
-    private static PagePrintResult Failed(
+    private static DocumentPrintResult Failed(
         PrintFailureStage stage,
         string message,
         int expectedPages,
         int pagesPrinted = 0,
         string? spoolerJobId = null) => new()
-    {
-        State = PagePrintState.Failed,
-        FailureStage = stage,
-        ErrorMessage = message,
-        SpoolerJobId = spoolerJobId,
-        PagesPrinted = pagesPrinted,
-        TotalPages = expectedPages,
-        PageCountConfidence = pagesPrinted > 0 ? "best_effort" : "unknown"
-    };
+        {
+            State = PagePrintState.Failed,
+            FailureStage = stage,
+            ErrorMessage = message,
+            SpoolerJobId = spoolerJobId,
+            PagesPrinted = pagesPrinted,
+            TotalPages = expectedPages,
+            PageCountConfidence = pagesPrinted > 0
+            ? PrintPageCountConfidence.BestEffort
+            : PrintPageCountConfidence.Unknown
+        };
 
-    private static PagePrintResult Cancelled(
+    private static DocumentPrintResult Cancelled(
         string message,
         int expectedPages,
         int pagesPrinted,
         string? spoolerJobId,
         PrintFailureStage stage = PrintFailureStage.SpoolerVerification) => new()
-    {
-        State = PagePrintState.Cancelled,
-        FailureStage = stage,
-        ErrorMessage = message,
-        SpoolerJobId = spoolerJobId,
-        PagesPrinted = pagesPrinted,
-        TotalPages = expectedPages,
-        PageCountConfidence = pagesPrinted > 0 ? "best_effort" : "unknown"
-    };
+        {
+            State = PagePrintState.Cancelled,
+            FailureStage = stage,
+            ErrorMessage = message,
+            SpoolerJobId = spoolerJobId,
+            PagesPrinted = pagesPrinted,
+            TotalPages = expectedPages,
+            PageCountConfidence = pagesPrinted > 0
+            ? PrintPageCountConfidence.BestEffort
+            : PrintPageCountConfidence.Unknown
+        };
 }

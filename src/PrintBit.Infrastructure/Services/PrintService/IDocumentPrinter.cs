@@ -4,7 +4,7 @@ namespace PrintBit.Infrastructure.Services.PrintService;
 
 public interface IDocumentPrinter
 {
-    Task<PagePrintResult> PrintDocumentAsync(
+    Task<DocumentPrintResult> PrintDocumentAsync(
         string filePath,
         string printerName,
         int copyNumber,

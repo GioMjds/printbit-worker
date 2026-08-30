@@ -40,7 +40,7 @@ public class JobOrchestratorTests
                     Func<Task> _,
                     CancellationToken _) =>
                     dispatches.Add((filePath, copyNumber, pages.ToArray())))
-                .ReturnsAsync(new PagePrintResult
+                .ReturnsAsync(new DocumentPrintResult
                 {
                     State = PagePrintState.Completed,
                     PagesPrinted = 3,
@@ -66,6 +66,9 @@ public class JobOrchestratorTests
             Assert.Equal(6, result.PagesPrinted);
             Assert.Equal(6, result.TotalPages);
             Assert.Equal("confirmed", result.PageCountConfidence);
+            Assert.Equal(
+                [WorkerPrintEventType.PrintStarted, WorkerPrintEventType.PrintSucceeded],
+                events.Select(evt => evt.Type));
             Assert.Equal(2, dispatches.Count);
             Assert.All(dispatches, dispatch => Assert.Equal(tempPdf, dispatch.FilePath));
             Assert.Equal([1, 2], dispatches.Select(dispatch => dispatch.CopyNumber));
@@ -113,14 +116,14 @@ public class JobOrchestratorTests
                     Func<string, Task> _,
                     Func<Task> _,
                     CancellationToken _) => Task.FromResult(copyNumber == 1
-                        ? new PagePrintResult
+                        ? new DocumentPrintResult
                         {
                             State = PagePrintState.Completed,
                             PagesPrinted = 3,
                             TotalPages = 3,
                             PageCountConfidence = "confirmed"
                         }
-                        : new PagePrintResult
+                        : new DocumentPrintResult
                         {
                             State = PagePrintState.Failed,
                             FailureStage = PrintFailureStage.HardwareError,

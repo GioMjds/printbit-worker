@@ -27,7 +27,7 @@ public class PrintJobResult
 
     public int? TotalPages { get; set; }
 
-    public string PageCountConfidence { get; set; } = "unknown";
+    public string PageCountConfidence { get; set; } = PrintPageCountConfidence.Unknown;
 
     public static PrintJobResult Failed(
         PrintFailureStage stage,
@@ -36,7 +36,7 @@ public class PrintJobResult
         string? spoolerJobId = null,
         int? pagesPrinted = null,
         int? totalPages = null,
-        string pageCountConfidence = "unknown")
+        string pageCountConfidence = PrintPageCountConfidence.Unknown)
     {
         return new PrintJobResult
         {

@@ -119,6 +119,102 @@ public class DocumentPrinterTests
         }
     }
 
+    [Fact]
+    public async Task PrintDocumentAsync_PaperOutPausesThenResumesSameJob()
+    {
+        var dummyExe = GetDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var healthMock = new Mock<IPrinterHealthMonitor>();
+            var pollCount = 0;
+            healthMock.Setup(h => h.QueryJobStatus(It.IsAny<string>(), It.IsAny<string>()))
+                .Returns(() => ++pollCount switch
+                {
+                    1 => (true, 0x40u, "Paper Out", 0, 3, "123"),
+                    2 => (true, 0x10u, "Printing", 1, 3, "123"),
+                    _ => (false, 0u, string.Empty, 0, 0, null)
+                });
+
+            var errorCode = 0;
+            var errorMessage = string.Empty;
+            healthMock.Setup(h => h.HasFatalHardwareError(It.IsAny<string>(), out errorCode, out errorMessage))
+                .Returns(false);
+
+            var paused = false;
+            var resumed = false;
+            var sut = CreateSut(dummyExe, healthMock.Object);
+            var result = await sut.PrintDocumentAsync(
+                tempPdf,
+                "TestPrinter",
+                1,
+                [1, 2, 3],
+                new PrintJobSettings(),
+                (_, _) => Task.CompletedTask,
+                _ => { paused = true; return Task.CompletedTask; },
+                () => { resumed = true; return Task.CompletedTask; },
+                CancellationToken.None);
+
+            Assert.True(paused);
+            Assert.True(resumed);
+            Assert.Equal(PagePrintState.Completed, result.State);
+            Assert.Equal("confirmed", result.PageCountConfidence);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
+    [Fact]
+    public async Task PrintDocumentAsync_JobDisappearsWhilePaperOut_ReturnsHardwareFailure()
+    {
+        var dummyExe = GetDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var healthMock = new Mock<IPrinterHealthMonitor>();
+            var pollCount = 0;
+            healthMock.Setup(h => h.QueryJobStatus(It.IsAny<string>(), It.IsAny<string>()))
+                .Returns(() => ++pollCount switch
+                {
+                    1 => (true, 0x10u, "Printing", 1, 3, "123"),
+                    2 => (true, 0x40u, "Paper Out", 1, 3, "123"),
+                    _ => (false, 0u, string.Empty, 0, 0, null)
+                });
+
+            var errorCode = 0;
+            var errorMessage = string.Empty;
+            healthMock.Setup(h => h.HasFatalHardwareError(It.IsAny<string>(), out errorCode, out errorMessage))
+                .Returns(false);
+
+            var sut = CreateSut(dummyExe, healthMock.Object);
+            var result = await sut.PrintDocumentAsync(
+                tempPdf,
+                "TestPrinter",
+                1,
+                [1, 2, 3],
+                new PrintJobSettings(),
+                (_, _) => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
+                CancellationToken.None);
+
+            Assert.Equal(PagePrintState.Failed, result.State);
+            Assert.Equal(PrintFailureStage.HardwareError, result.FailureStage);
+            Assert.Equal(1, result.PagesPrinted);
+            Assert.Equal("best_effort", result.PageCountConfidence);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
     private static DocumentPrinter CreateSut(string sumatraPath, IPrinterHealthMonitor healthMonitor)
     {
         return new DocumentPrinter(

@@ -60,14 +60,15 @@ public class WorkerPrintEventTests
     }
 
     [Fact]
-    public void HardwareSettings_HasNewConfigFields()
+    public void HardwareSettings_HasWholeDocumentConfigFields()
     {
         var settings = new HardwareSettings();
 
         Assert.Equal(@"C:\Users\printbit\bin\SumatraPDF.exe", settings.SumatraPath);
         Assert.Equal(@"C:\Users\printbit\bin\qpdf.exe", settings.QpdfPath);
-        Assert.Equal(30, settings.PdfSplitTimeoutSeconds);
         Assert.Equal(15, settings.PauseTimeoutMinutes);
+        Assert.Equal(12, settings.PostClearGuardDelaySeconds);
+        Assert.Null(typeof(HardwareSettings).GetProperty("PdfSplitTimeoutSeconds"));
     }
 
     [Fact]
