@@ -32,20 +32,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     private int _fatalErrorCode = 0;
     private string _fatalErrorMessage = string.Empty;
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr LoadLibrary(string lpFileName);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
-    private delegate int PrGetStatusCodeDelegate(string printerName, ref int statusCode);
-
-    private static IntPtr _epsonDllHandle = IntPtr.Zero;
-    private static PrGetStatusCodeDelegate? _prGetStatusCode = null;
-    private static readonly object EpsonApiInitializationLock = new();
-    private static bool _epsonApiInitialized = false;
-
     // Win32 APIs for Epson Status Monitor Popup checking
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern bool IsWindowVisible(IntPtr hWnd);
@@ -79,87 +65,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         _eventPipe = eventPipe;
     }
 
-    private static void EnsureEpsonApiInitialized()
-    {
-        if (_epsonApiInitialized)
-        {
-            return;
-        }
-
-        lock (EpsonApiInitializationLock)
-        {
-            if (_epsonApiInitialized)
-            {
-                return;
-            }
-
-            try
-            {
-                var driverDirectory = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.System),
-                    "spool",
-                    "drivers",
-                    "x64",
-                    "3");
-                var driverStatusLibrary = Path.Combine(driverDirectory, "E_YAPRYRE.DLL");
-                if (File.Exists(driverStatusLibrary))
-                {
-                    _epsonDllHandle = LoadLibrary(driverStatusLibrary);
-                    if (_epsonDllHandle != IntPtr.Zero)
-                    {
-                        var procedure = GetProcAddress(_epsonDllHandle, "PrGetStatusCode");
-                        if (procedure != IntPtr.Zero)
-                        {
-                            _prGetStatusCode =
-                                Marshal.GetDelegateForFunctionPointer<PrGetStatusCodeDelegate>(procedure);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-                // Standard WinSpool and WMI sources remain available when
-                // the Epson driver does not expose its status-code API.
-            }
-            finally
-            {
-                _epsonApiInitialized = true;
-            }
-        }
-    }
-
-    protected virtual bool TryGetEpsonDriverStatusCode(
-        string printerName,
-        out int statusCode,
-        out string description)
-    {
-        statusCode = 0;
-        description = "Ready";
-        EnsureEpsonApiInitialized();
-
-        if (_prGetStatusCode is null)
-        {
-            return false;
-        }
-
-        try
-        {
-            var rawStatusCode = 0;
-            if (_prGetStatusCode(printerName, ref rawStatusCode) != 1)
-            {
-                return false;
-            }
-
-            statusCode = rawStatusCode & 0xFF;
-            description = DetectedErrorStateDescription(statusCode);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     public virtual bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc)
     {
         var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var status, out winSpoolDesc);
@@ -168,18 +73,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         var wmiHealthy = IsWmiHealthy(printerName, out _);
         var (hasPopup, _, _, _) = CheckEpsonStatusMonitorPopup(printerName);
 
-        var epsonHealthy = true;
-        if (TryGetEpsonDriverStatusCode(printerName, out var epsonStatusCode, out var epsonDescription))
-        {
-            if (IsFatalDetectedErrorState(epsonStatusCode))
-            {
-                epsonHealthy = false;
-                winSpoolStatus = epsonStatusCode;
-                winSpoolDesc = $"Epson driver reports: {epsonDescription}";
-            }
-        }
-
-        return wsHealthy && wmiHealthy && !hasPopup && epsonHealthy;
+        return wsHealthy && wmiHealthy && !hasPopup;
     }
 
     public bool HasFatalHardwareError(string printerName, out int errorCode, out string errorMessage)
@@ -195,14 +89,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                     return true;
                 }
             }
-        }
-
-        if (TryGetEpsonDriverStatusCode(printerName, out var epsonStatusCode, out var epsonDescription) &&
-            IsFatalDetectedErrorState(epsonStatusCode))
-        {
-            errorCode = epsonStatusCode;
-            errorMessage = $"Epson driver reports: {epsonDescription}";
-            return true;
         }
 
         var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var winSpoolStatus, out var winSpoolDesc);
@@ -433,13 +319,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             out var detectedErrorState,
             out var extendedPrinterStatus);
 
-        var isFatalEpsonStatus =
-            TryGetEpsonDriverStatusCode(
-                _hardwareSettings.PrinterName,
-                out var epsonStatusCode,
-                out var epsonStatusDescription) &&
-            IsFatalDetectedErrorState(epsonStatusCode);
-
         if (foundPrinter)
         {
             var isFatalWmi = IsFatalDetectedErrorState(detectedErrorState);
@@ -459,20 +338,16 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
             lock (_lock)
             {
-                if (isFatalEpsonStatus || isFatalWmi || isFatalExtendedStatus)
+                if (isFatalWmi || isFatalExtendedStatus)
                 {
-                    _fatalErrorCode = isFatalEpsonStatus
-                        ? epsonStatusCode
-                        : isFatalWmi
-                            ? detectedErrorState
-                            : extendedPrinterStatus;
-                    _fatalErrorMessage = isFatalEpsonStatus
-                        ? epsonStatusDescription
-                        : isFatalWmi
-                            ? DetectedErrorStateDescription(detectedErrorState)
-                            : ExtendedPrinterStatusDescription(extendedPrinterStatus);
+                    _fatalErrorCode = isFatalWmi
+                        ? detectedErrorState
+                        : extendedPrinterStatus;
+                    _fatalErrorMessage = isFatalWmi
+                        ? DetectedErrorStateDescription(detectedErrorState)
+                        : ExtendedPrinterStatusDescription(extendedPrinterStatus);
 
-                    var stateIdentifier = $"{detectedErrorState}_{extendedPrinterStatus}_{epsonStatusCode}";
+                    var stateIdentifier = $"{detectedErrorState}_{extendedPrinterStatus}";
                     if (_lastErrorState != stateIdentifier)
                     {
                         _lastErrorState = stateIdentifier;

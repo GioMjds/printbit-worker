@@ -40,20 +40,26 @@ public class PrinterHealthMonitorTests
         }
     }
 
-    private sealed class EpsonStatusMonitor : PrinterHealthMonitor
+    private sealed class WmiStatusMonitor : PrinterHealthMonitor
     {
-        private readonly int _epsonStatusCode;
+        private readonly int _detectedErrorState;
+        private readonly int _extendedPrinterStatus;
+        private readonly bool _isOffline;
 
-        public EpsonStatusMonitor(
+        public WmiStatusMonitor(
             IOptions<HardwareSettings> hardwareOptions,
             IWorkerEventPipeClient eventPipe,
-            int epsonStatusCode)
+            int detectedErrorState = 0,
+            int extendedPrinterStatus = 3,
+            bool isOffline = false)
             : base(
                 NullLogger<PrinterHealthMonitor>.Instance,
                 hardwareOptions,
                 eventPipe)
         {
-            _epsonStatusCode = epsonStatusCode;
+            _detectedErrorState = detectedErrorState;
+            _extendedPrinterStatus = extendedPrinterStatus;
+            _isOffline = isOffline;
         }
 
         protected override bool TryReadMonitorStatus(
@@ -62,26 +68,9 @@ public class PrinterHealthMonitorTests
             out int detectedErrorState,
             out int extendedPrinterStatus)
         {
-            isOffline = false;
-            detectedErrorState = 0;
-            extendedPrinterStatus = 3;
-            return true;
-        }
-
-        protected override bool TryGetEpsonDriverStatusCode(
-            string printerName,
-            out int statusCode,
-            out string description)
-        {
-            statusCode = _epsonStatusCode;
-            description = _epsonStatusCode switch
-            {
-                4 => "No Paper",
-                6 => "No Toner",
-                7 => "Door Open",
-                8 => "Jammed",
-                _ => "Ready"
-            };
+            isOffline = _isOffline;
+            detectedErrorState = _detectedErrorState;
+            extendedPrinterStatus = _extendedPrinterStatus;
             return true;
         }
 
@@ -140,30 +129,16 @@ public class PrinterHealthMonitorTests
     }
 
     [Fact]
-    public void IsHealthy_EpsonDriverNoPaper_ReturnsFalse()
+    public async Task HasFatalHardwareError_WmiNoPaper_ReturnsTrue()
     {
         var eventPipe = new Mock<IWorkerEventPipeClient>();
-        var monitor = new EpsonStatusMonitor(
+        var monitor = new WmiStatusMonitor(
             Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
             eventPipe.Object,
-            epsonStatusCode: 4);
+            detectedErrorState: 4);
 
-        var healthy = monitor.IsHealthy("EPSON L5290 Series", out var status, out var desc);
-
-        Assert.False(healthy);
-        Assert.Equal(4, status);
-        Assert.Contains("No Paper", desc);
-    }
-
-    [Fact]
-    public void HasFatalHardwareError_EpsonDriverNoPaper_ReturnsTrue()
-    {
-        var eventPipe = new Mock<IWorkerEventPipeClient>();
-        var monitor = new EpsonStatusMonitor(
-            Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
-            eventPipe.Object,
-            epsonStatusCode: 4);
-
+        // Monitor once so _fatalErrorCode gets updated
+        await monitor.MonitorOnceAsync(CancellationToken.None);
         var hasFatal = monitor.HasFatalHardwareError("EPSON L5290 Series", out var code, out var msg);
 
         Assert.True(hasFatal);
@@ -172,7 +147,7 @@ public class PrinterHealthMonitorTests
     }
 
     [Fact]
-    public async Task MonitorPrinterAsync_EpsonDriverNoPaper_EmitsPrinterError()
+    public async Task MonitorPrinterAsync_WmiNoPaper_EmitsPrinterError()
     {
         var capturedEvents = new List<WorkerPrintEvent>();
         var eventPipe = new Mock<IWorkerEventPipeClient>();
@@ -181,10 +156,10 @@ public class PrinterHealthMonitorTests
             .Callback<WorkerPrintEvent, CancellationToken>((evt, _) => capturedEvents.Add(evt))
             .ReturnsAsync(true);
 
-        var monitor = new EpsonStatusMonitor(
+        var monitor = new WmiStatusMonitor(
             Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
             eventPipe.Object,
-            epsonStatusCode: 4);
+            detectedErrorState: 4);
 
         await monitor.MonitorOnceAsync(CancellationToken.None);
 
