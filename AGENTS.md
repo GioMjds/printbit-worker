@@ -132,7 +132,7 @@ Critical constraints:
 - When a cleared job's last positive `TotalPages` is lower than the selected-page count, verification fails with `PrintFailureStage.IncompleteOutput`.
 - After each whole-document copy clears, `DocumentPrinter` keeps the configured 12-second post-clear hardware guard window before returning success.
 - Page counts from WMI are unreliable and can lag behind job completion. If the job has cleared and the printer is completely healthy, the print is treated as a success even if the last polled page count was less than expected, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated or aborted job).
-- `PrinterHealthMonitor` treats fatal WMI, WinSpool, and Epson driver status codes as hardware errors. Its Epson driver query (`E_YAPRYRE.DLL` / `PrGetStatusCode`) is session-independent, so the Windows Service does not rely on an interactive Epson popup to publish `PrinterError`.
+- `PrinterHealthMonitor` now treats `DetectedErrorState` as fatal only when code ≥ 3 and exposes this status via `IsHealthy` and `HasFatalHardwareError`.
 - Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
 - Any process or verification failure returns `Success = false` with stage detail.
 - When verification fails, any matching print jobs in the Windows spooler queue are automatically cancelled/deleted via WMI to clear the printer's hardware queue and prevent subsequent jobs from being blocked.
@@ -224,7 +224,7 @@ Dependency direction:
 |---|---|---|
 | `PrintQueueWatcher` | HardwareService | Watches queue directory, delegates to `IJobOrchestrator`, and cleans up sidecar files |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
-| `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for WMI, WinSpool, and session-independent Epson driver status, offline status, and recovery routines |
+| `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, and recovery routines |
 | `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 | `JobOrchestrator` | Infrastructure | Counts and selects pages, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
@@ -339,7 +339,7 @@ Reset() from any state -> Idle
 - Add values to `Esp32MessageType` and update parser/docs.
 - Add `Esp32Command` constants and update docs.
 - Extend active non-stub classes.
-- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, whole-document dispatch, page-count confidence, print verification behavior, and printer pre-flight/recovery status checking, including Epson driver faults emitting `PrinterError` to Node.js.
+- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, whole-document dispatch, page-count confidence, print verification behavior, and printer pre-flight/recovery status checking.
 - Add new `IOptions<T>` config models in `PrintBit.Shared`.
 - Extend `HardwareSettings` and sync docs.
 
@@ -439,7 +439,7 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - If the spooler job clears and the printer is completely healthy (no error reported via WMI, Epson popups, or direct WinSpool checks), the print is treated as a success regardless of WMI page count reporting lag, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated/aborted job).
 - `Win32_PrintJob.PagesPrinted` is best-effort telemetry, not proof that a sheet physically exited. Terminal events label the count `confirmed`, `best_effort`, or `unknown`.
 - Before each copy, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy`; an in-flight job with recoverable status flags remains in the spooler and resumes after health returns.
-- `PrinterHealthMonitor` reports fatal WMI, WinSpool, and Epson driver status codes to Node.js as `PrinterError` and exposes them to in-flight print verification. The Epson driver path is independent of status-monitor popups, which are not dependable from the Windows Service session.
+- `PrinterHealthMonitor` reports fatal `DetectedErrorState` codes (≥ 3) to Node.js as `PrinterError` and exposes them to in-flight print verification.
 - Queue watcher requests go directly to `JobOrchestrator` (no transaction gate).
 
 ### State Machine
