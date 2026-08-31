@@ -102,8 +102,11 @@ public sealed class JobOrchestrator : IJobOrchestrator
                     copyEntries[0],
                     cancellationToken))
             {
+                _healthMonitor.HasFatalHardwareError(request.PrinterName, out _, out var fatalDesc);
                 copyEntries[0].State = PagePrintState.Failed;
-                copyEntries[0].ErrorMessage = "Pause timeout exceeded during pre-flight health wait";
+                copyEntries[0].ErrorMessage = string.IsNullOrWhiteSpace(fatalDesc)
+                    ? "Pause timeout exceeded during pre-flight health wait"
+                    : $"Printer remained unhealthy during pre-flight health wait: {fatalDesc}";
                 CancelRemaining(manifest, copyEntries[0].SequenceIndex + 1);
                 failureStage = PrintFailureStage.HardwareError;
                 failureMessage = copyEntries[0].ErrorMessage;

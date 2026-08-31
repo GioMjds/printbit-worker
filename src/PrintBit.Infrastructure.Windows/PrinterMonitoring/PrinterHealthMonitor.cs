@@ -22,7 +22,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 {
     private readonly ILogger<PrinterHealthMonitor> _logger;
     private readonly HardwareSettings _hardwareSettings;
-    private readonly WorkerEventPipeClient _eventPipe;
+    private readonly IWorkerEventPipeClient _eventPipe;
     private readonly object _lock = new();
 
     private bool? _lastOfflineState = null;
@@ -31,6 +31,20 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     
     private int _fatalErrorCode = 0;
     private string _fatalErrorMessage = string.Empty;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    private delegate int PrGetStatusCodeDelegate(string printerName, ref int statusCode);
+
+    private static IntPtr _epsonDllHandle = IntPtr.Zero;
+    private static PrGetStatusCodeDelegate? _prGetStatusCode = null;
+    private static readonly object EpsonApiInitializationLock = new();
+    private static bool _epsonApiInitialized = false;
 
     // Win32 APIs for Epson Status Monitor Popup checking
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
@@ -58,11 +72,92 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     public PrinterHealthMonitor(
         ILogger<PrinterHealthMonitor> logger,
         IOptions<HardwareSettings> hardwareOptions,
-        WorkerEventPipeClient eventPipe)
+        IWorkerEventPipeClient eventPipe)
     {
         _logger = logger;
         _hardwareSettings = hardwareOptions.Value;
         _eventPipe = eventPipe;
+    }
+
+    private static void EnsureEpsonApiInitialized()
+    {
+        if (_epsonApiInitialized)
+        {
+            return;
+        }
+
+        lock (EpsonApiInitializationLock)
+        {
+            if (_epsonApiInitialized)
+            {
+                return;
+            }
+
+            try
+            {
+                var driverDirectory = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "spool",
+                    "drivers",
+                    "x64",
+                    "3");
+                var driverStatusLibrary = Path.Combine(driverDirectory, "E_YAPRYRE.DLL");
+                if (File.Exists(driverStatusLibrary))
+                {
+                    _epsonDllHandle = LoadLibrary(driverStatusLibrary);
+                    if (_epsonDllHandle != IntPtr.Zero)
+                    {
+                        var procedure = GetProcAddress(_epsonDllHandle, "PrGetStatusCode");
+                        if (procedure != IntPtr.Zero)
+                        {
+                            _prGetStatusCode =
+                                Marshal.GetDelegateForFunctionPointer<PrGetStatusCodeDelegate>(procedure);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Standard WinSpool and WMI sources remain available when
+                // the Epson driver does not expose its status-code API.
+            }
+            finally
+            {
+                _epsonApiInitialized = true;
+            }
+        }
+    }
+
+    protected virtual bool TryGetEpsonDriverStatusCode(
+        string printerName,
+        out int statusCode,
+        out string description)
+    {
+        statusCode = 0;
+        description = "Ready";
+        EnsureEpsonApiInitialized();
+
+        if (_prGetStatusCode is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var rawStatusCode = 0;
+            if (_prGetStatusCode(printerName, ref rawStatusCode) != 1)
+            {
+                return false;
+            }
+
+            statusCode = rawStatusCode & 0xFF;
+            description = DetectedErrorStateDescription(statusCode);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public virtual bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc)
@@ -73,7 +168,18 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         var wmiHealthy = IsWmiHealthy(printerName, out _);
         var (hasPopup, _, _, _) = CheckEpsonStatusMonitorPopup(printerName);
 
-        return wsHealthy && wmiHealthy && !hasPopup;
+        var epsonHealthy = true;
+        if (TryGetEpsonDriverStatusCode(printerName, out var epsonStatusCode, out var epsonDescription))
+        {
+            if (IsFatalDetectedErrorState(epsonStatusCode))
+            {
+                epsonHealthy = false;
+                winSpoolStatus = epsonStatusCode;
+                winSpoolDesc = $"Epson driver reports: {epsonDescription}";
+            }
+        }
+
+        return wsHealthy && wmiHealthy && !hasPopup && epsonHealthy;
     }
 
     public bool HasFatalHardwareError(string printerName, out int errorCode, out string errorMessage)
@@ -89,6 +195,14 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                     return true;
                 }
             }
+        }
+
+        if (TryGetEpsonDriverStatusCode(printerName, out var epsonStatusCode, out var epsonDescription) &&
+            IsFatalDetectedErrorState(epsonStatusCode))
+        {
+            errorCode = epsonStatusCode;
+            errorMessage = $"Epson driver reports: {epsonDescription}";
+            return true;
         }
 
         var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var winSpoolStatus, out var winSpoolDesc);
@@ -154,12 +268,21 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         {
             _logger.LogWarning("Executing printer recovery spooler restarts...");
             KillProcess("SumatraPDF");
-            KillProcess("E_YARNYRE");
+            KillEpsonProcesses();
             await RestartSpoolerAsync();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Recovery failed");
+        }
+    }
+
+    private void KillEpsonProcesses()
+    {
+        string[] epsonExes = { "E_YATIYRE", "E_YARNYRE", "E_S11RPB", "E_YBCSYRE" };
+        foreach (var name in epsonExes)
+        {
+            KillProcess(name);
         }
     }
 
@@ -257,79 +380,120 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         }
     }
 
-    private async Task MonitorPrinterAsync(CancellationToken stoppingToken)
+    protected virtual bool TryReadMonitorStatus(
+        string printerName,
+        out bool isOffline,
+        out int detectedErrorState,
+        out int extendedPrinterStatus)
     {
-        var escapedPrinterName = _hardwareSettings.PrinterName.Replace("'", "''");
-        using var searcher = new ManagementObjectSearcher(
-            $"SELECT DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
+        isOffline = false;
+        detectedErrorState = 0;
+        extendedPrinterStatus = 0;
 
-        bool foundPrinter = false;
-        using var results = searcher.Get();
-        foreach (ManagementObject printer in results.Cast<ManagementObject>())
+        try
         {
-            foundPrinter = true;
-            try
+            var escapedPrinterName = printerName.Replace("'", "''");
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
+
+            using var results = searcher.Get();
+            foreach (ManagementObject printer in results.Cast<ManagementObject>())
             {
-                var isOffline = printer["WorkOffline"] is true;
-                var extStatus = Convert.ToInt32(printer["ExtendedPrinterStatus"] ?? 0);
-                if (extStatus is 7 or 11)
+                try
                 {
-                    isOffline = true;
-                }
-
-                var errorStateRaw = printer["DetectedErrorState"]?.ToString() ?? "0";
-                var errorCode = int.TryParse(errorStateRaw, out var c) ? c : 0;
-                var isFatalWmi = IsFatalDetectedErrorState(errorCode);
-                var isFatalExt = IsFatalExtendedPrinterStatus(extStatus) && extStatus is not (7 or 11);
-
-                if (_lastOfflineState != isOffline)
-                {
-                    _lastOfflineState = isOffline;
-                    _pendingEvent = new WorkerPrintEvent
+                    isOffline = printer["WorkOffline"] is true;
+                    extendedPrinterStatus = Convert.ToInt32(printer["ExtendedPrinterStatus"] ?? 0);
+                    if (extendedPrinterStatus is 7 or 11)
                     {
-                        Type = isOffline ? WorkerPrintEventType.PrinterOffline : WorkerPrintEventType.PrinterOnline,
-                        PrinterName = _hardwareSettings.PrinterName,
-                        Message = isOffline ? "Printer offline" : "Printer back online"
-                    };
-                }
-
-                lock (_lock)
-                {
-                    if (isFatalWmi || isFatalExt)
-                    {
-                        _fatalErrorCode = isFatalWmi ? errorCode : extStatus;
-                        _fatalErrorMessage = isFatalWmi
-                            ? DetectedErrorStateDescription(errorCode)
-                            : ExtendedPrinterStatusDescription(extStatus);
-
-                        var stateIdentifier = $"{errorStateRaw}_{extStatus}";
-                        if (_lastErrorState != stateIdentifier)
-                        {
-                            _lastErrorState = stateIdentifier;
-                            _pendingEvent = new WorkerPrintEvent
-                            {
-                                Type = WorkerPrintEventType.PrinterError,
-                                PrinterName = _hardwareSettings.PrinterName,
-                                FailureStage = "hardware_error",
-                                Message = $"Printer error ({_fatalErrorMessage})"
-                            };
-                        }
+                        isOffline = true;
                     }
-                    else
-                    {
-                        _fatalErrorCode = 0;
-                        _fatalErrorMessage = string.Empty;
-                        _lastErrorState = null;
-                    }
+
+                    detectedErrorState = Convert.ToInt32(printer["DetectedErrorState"] ?? 0);
+                    return true;
                 }
-            }
-            finally
-            {
-                printer.Dispose();
+                finally
+                {
+                    printer.Dispose();
+                }
             }
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read printer status for {printerName}", printerName);
+        }
 
-        if (!foundPrinter)
+        return false;
+    }
+
+    protected virtual async Task MonitorPrinterAsync(CancellationToken stoppingToken)
+    {
+        var foundPrinter = TryReadMonitorStatus(
+            _hardwareSettings.PrinterName,
+            out var isOffline,
+            out var detectedErrorState,
+            out var extendedPrinterStatus);
+
+        var isFatalEpsonStatus =
+            TryGetEpsonDriverStatusCode(
+                _hardwareSettings.PrinterName,
+                out var epsonStatusCode,
+                out var epsonStatusDescription) &&
+            IsFatalDetectedErrorState(epsonStatusCode);
+
+        if (foundPrinter)
+        {
+            var isFatalWmi = IsFatalDetectedErrorState(detectedErrorState);
+            var isFatalExtendedStatus =
+                IsFatalExtendedPrinterStatus(extendedPrinterStatus) && extendedPrinterStatus is not (7 or 11);
+
+            if (_lastOfflineState != isOffline)
+            {
+                _lastOfflineState = isOffline;
+                _pendingEvent = new WorkerPrintEvent
+                {
+                    Type = isOffline ? WorkerPrintEventType.PrinterOffline : WorkerPrintEventType.PrinterOnline,
+                    PrinterName = _hardwareSettings.PrinterName,
+                    Message = isOffline ? "Printer offline" : "Printer back online"
+                };
+            }
+
+            lock (_lock)
+            {
+                if (isFatalEpsonStatus || isFatalWmi || isFatalExtendedStatus)
+                {
+                    _fatalErrorCode = isFatalEpsonStatus
+                        ? epsonStatusCode
+                        : isFatalWmi
+                            ? detectedErrorState
+                            : extendedPrinterStatus;
+                    _fatalErrorMessage = isFatalEpsonStatus
+                        ? epsonStatusDescription
+                        : isFatalWmi
+                            ? DetectedErrorStateDescription(detectedErrorState)
+                            : ExtendedPrinterStatusDescription(extendedPrinterStatus);
+
+                    var stateIdentifier = $"{detectedErrorState}_{extendedPrinterStatus}_{epsonStatusCode}";
+                    if (_lastErrorState != stateIdentifier)
+                    {
+                        _lastErrorState = stateIdentifier;
+                        _pendingEvent = new WorkerPrintEvent
+                        {
+                            Type = WorkerPrintEventType.PrinterError,
+                            PrinterName = _hardwareSettings.PrinterName,
+                            FailureStage = "hardware_error",
+                            Message = $"Printer error ({_fatalErrorMessage})"
+                        };
+                    }
+                }
+                else
+                {
+                    _fatalErrorCode = 0;
+                    _fatalErrorMessage = string.Empty;
+                    _lastErrorState = null;
+                }
+            }
+        }
+        else
         {
             if (_lastOfflineState != true)
             {
