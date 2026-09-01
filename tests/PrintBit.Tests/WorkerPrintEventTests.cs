@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using PrintBit.HardwareService.Services;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Shared.Configurations;
+using PrintBit.Shared.Power;
 using PrintBit.Shared.Printing;
 
 namespace PrintBit.Tests;
@@ -104,4 +105,129 @@ public class WorkerPrintEventTests
         Assert.Contains("\"pages\":[", json);
         Assert.Contains("\"state\":\"completed\"", json);
     }
+
+    [Fact]
+    public void PowerSettings_HasExpectedDefaultValues()
+    {
+        var settings = new PowerSettings();
+
+        Assert.Equal(2, settings.PollIntervalSeconds);
+        Assert.Equal(10, settings.StableRecoverySeconds);
+        Assert.Equal(10, settings.HeartbeatIntervalSeconds);
+    }
+
+    [Fact]
+    public void WorkerPrintEvent_SerializesPowerStatusSnapshotPayload()
+    {
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
+
+        var powerStatus = new PowerStatusSnapshot(
+            AcLineStatus: AcLineStatus.Offline,
+            IsCharging: false,
+            BatteryPercentage: 85,
+            IsBatteryLow: false,
+            IsBatteryCritical: false);
+
+        var evt = new WorkerPrintEvent
+        {
+            Type = WorkerPrintEventType.PowerStatusSnapshot,
+            OperationalState = PowerOperationalState.PowerEmergency,
+            AcceptingTransactions = false,
+            PowerSourceInstanceId = "tablet-battery-01",
+            PowerSequence = 42L,
+            PowerStatus = powerStatus
+        };
+
+        var json = JsonSerializer.Serialize(evt, jsonOptions);
+        using var doc = JsonDocument.Parse(json);
+
+        Assert.Equal("PowerStatusSnapshot", doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("PowerEmergency", doc.RootElement.GetProperty("operationalState").GetString());
+        Assert.False(doc.RootElement.GetProperty("acceptingTransactions").GetBoolean());
+        Assert.Equal("tablet-battery-01", doc.RootElement.GetProperty("powerSourceInstanceId").GetString());
+        Assert.Equal(42L, doc.RootElement.GetProperty("powerSequence").GetInt64());
+
+        var statusProp = doc.RootElement.GetProperty("powerStatus");
+        Assert.Equal("Offline", statusProp.GetProperty("acLineStatus").GetString());
+        Assert.False(statusProp.GetProperty("isCharging").GetBoolean());
+        Assert.Equal(85, statusProp.GetProperty("batteryPercentage").GetInt32());
+        Assert.False(statusProp.GetProperty("isBatteryLow").GetBoolean());
+        Assert.False(statusProp.GetProperty("isBatteryCritical").GetBoolean());
+    }
+
+    [Fact]
+    public void WorkerPrintEvent_SerializesPowerStatusChangedPayload()
+    {
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
+
+        var evt = new WorkerPrintEvent
+        {
+            Type = WorkerPrintEventType.PowerStatusChanged,
+            OperationalState = PowerOperationalState.Recovering,
+            AcceptingTransactions = false,
+            PowerSourceInstanceId = "tablet-battery-01",
+            PowerSequence = 43L,
+            PowerStatus = new PowerStatusSnapshot(
+                AcLineStatus: AcLineStatus.Online,
+                IsCharging: true,
+                BatteryPercentage: 86,
+                IsBatteryLow: false,
+                IsBatteryCritical: false)
+        };
+
+        var json = JsonSerializer.Serialize(evt, jsonOptions);
+        using var doc = JsonDocument.Parse(json);
+
+        Assert.Equal("PowerStatusChanged", doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("Recovering", doc.RootElement.GetProperty("operationalState").GetString());
+        Assert.False(doc.RootElement.GetProperty("acceptingTransactions").GetBoolean());
+    }
+
+    [Fact]
+    public void WorkerPrintEvent_DeserializesPowerPayloadFromCamelCaseJson()
+    {
+        var json = """
+        {
+            "type": "PowerStatusSnapshot",
+            "operationalState": "PowerEmergency",
+            "acceptingTransactions": false,
+            "powerSourceInstanceId": "tablet-battery-01",
+            "powerSequence": 100,
+            "powerStatus": {
+                "acLineStatus": "Offline",
+                "isCharging": false,
+                "batteryPercentage": 50,
+                "isBatteryLow": true,
+                "isBatteryCritical": false
+            }
+        }
+        """;
+
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
+
+        var evt = JsonSerializer.Deserialize<WorkerPrintEvent>(json, jsonOptions);
+
+        Assert.NotNull(evt);
+        Assert.Equal(WorkerPrintEventType.PowerStatusSnapshot, evt.Type);
+        Assert.Equal(PowerOperationalState.PowerEmergency, evt.OperationalState);
+        Assert.False(evt.AcceptingTransactions);
+        Assert.Equal("tablet-battery-01", evt.PowerSourceInstanceId);
+        Assert.Equal(100L, evt.PowerSequence);
+        Assert.NotNull(evt.PowerStatus);
+        Assert.Equal(AcLineStatus.Offline, evt.PowerStatus.AcLineStatus);
+        Assert.False(evt.PowerStatus.IsCharging);
+        Assert.Equal(50, evt.PowerStatus.BatteryPercentage);
+        Assert.True(evt.PowerStatus.IsBatteryLow);
+        Assert.False(evt.PowerStatus.IsBatteryCritical);
+    }
 }
+

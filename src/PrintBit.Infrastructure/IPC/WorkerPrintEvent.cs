@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
+using PrintBit.Shared.Power;
 
 namespace PrintBit.Infrastructure.IPC;
 
@@ -69,4 +70,18 @@ public sealed record WorkerPrintEvent
     [JsonPropertyName("completedAt")]
     public DateTime? CompletedAt { get; init; }
 
+    [JsonPropertyName("powerStatus")]
+    public PowerStatusSnapshot? PowerStatus { get; init; }
+
+    [JsonPropertyName("operationalState")]
+    public PowerOperationalState? OperationalState { get; init; }
+
+    [JsonPropertyName("acceptingTransactions")]
+    public bool? AcceptingTransactions { get; init; }
+
+    [JsonPropertyName("powerSourceInstanceId")]
+    public string? PowerSourceInstanceId { get; init; }
+
+    [JsonPropertyName("powerSequence")]
+    public long? PowerSequence { get; init; }
 }
