@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
+using PrintBit.Infrastructure.Windows.PowerMonitoring;
 using PrintBit.Shared.Configurations;
 using PrintBit.Shared.Printing;
 
@@ -20,15 +21,18 @@ public class PrintQueueWatcher : BackgroundService
     private readonly ILogger<PrintQueueWatcher> _logger;
     private readonly IJobOrchestrator _orchestrator;
     private readonly HardwareSettings _settings;
+    private readonly IPowerSafetyGate _powerSafetyGate;
 
     public PrintQueueWatcher(
         ILogger<PrintQueueWatcher> logger,
         IJobOrchestrator orchestrator,
-        IOptions<HardwareSettings> options)
+        IOptions<HardwareSettings> options,
+        IPowerSafetyGate powerSafetyGate)
     {
         _logger = logger;
         _orchestrator = orchestrator;
         _settings = options.Value;
+        _powerSafetyGate = powerSafetyGate;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -77,7 +81,18 @@ public class PrintQueueWatcher : BackgroundService
                             Settings = printSettings
                         };
 
-                        var result = await _orchestrator.ProcessJobAsync(request, jsonFile, stoppingToken);
+                        var lease = _powerSafetyGate.TryAcquirePrintLease();
+                        if (lease is null)
+                        {
+                            _logger.LogWarning("Power safety gate closed; postponing dispatch for {pdfFile}", pdfFile);
+                            continue;
+                        }
+
+                        PrintBit.Infrastructure.Services.PrintService.PrintJobResult result;
+                        using (lease)
+                        {
+                            result = await _orchestrator.ProcessJobAsync(request, jsonFile, stoppingToken);
+                        }
                         if (result.Success)
                         {
                             try { File.Delete(pdfFile); } catch { }
