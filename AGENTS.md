@@ -207,7 +207,7 @@ Each connection receives one JSON line, dispatches one command, writes one singl
 |---|---|---|---|---|
 | `healthy` | Spooler running and printer diagnostic is healthy | No | `null` | Kiosk printer ready for printing. |
 | `recovered` | Windows-side fault detected, Spooler restart succeeded, and printer diagnostic rechecked healthy within deadline | Yes | `"RestartSpooler"` | Printer restored to healthy operation. |
-| `manual_intervention_required` | Physical printer error detected before or after restart (paper out, jam, door open, ink empty, service required, or Epson popup dialog) | No | `null` | Physical fault requires staff intervention. |
+| `manual_intervention_required` | Physical printer error detected before or after restart (paper out, jam, door open, ink empty, service required, or Epson popup dialog) | No / Yes (if detected after) | `null` | Physical fault requires staff intervention. |
 | `worker_busy` | Recovery lease cannot be acquired because an active print job or another recovery operation holds the lease | No | `null` | Active print protected; Node retries after print completes. |
 | `restart_failed` | Spooler service failed to stop/start within timeout (30s), transition errored, or final recheck timed out without health | Yes | `"RestartSpooler"` | Spooler restart failed to clear fault. |
 | `invalid_request` | Malformed JSON, payload > 8192 bytes, unknown command type, or missing required fields (`requestId`) | No | `null` | Client request rejected before processing. |
