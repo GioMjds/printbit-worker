@@ -1,0 +1,529 @@
+using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Moq;
+using PrintBit.HardwareService.Services;
+using PrintBit.Infrastructure.IPC;
+using PrintBit.Infrastructure.Services.PrintService;
+using PrintBit.Shared.Configurations;
+using Xunit;
+
+namespace PrintBit.Tests;
+
+public class WorkerCommandPipeTests
+{
+    private readonly Mock<IPrinterRecoveryService> _recoveryServiceMock;
+    private readonly Mock<ILogger<WorkerCommandPipeHostedService>> _loggerMock;
+    private readonly IpcSettings _ipcSettings;
+
+    public WorkerCommandPipeTests()
+    {
+        _recoveryServiceMock = new Mock<IPrinterRecoveryService>();
+        _loggerMock = new Mock<ILogger<WorkerCommandPipeHostedService>>();
+        _ipcSettings = new IpcSettings
+        {
+            WorkerCommandPipeName = "test-worker-commands-" + Guid.NewGuid().ToString("N"),
+            MaxMessageBytes = 8192
+        };
+    }
+
+    private WorkerCommandPipeHostedService CreateHostedService()
+    {
+        return new WorkerCommandPipeHostedService(
+            _loggerMock.Object,
+            _recoveryServiceMock.Object,
+            Options.Create(_ipcSettings));
+    }
+
+    #region 1. Command Parser Tests (Valid Cases)
+
+    [Fact]
+    public void Parser_ValidGetPrinterRecoveryStatus_ParsesSuccessfully()
+    {
+        const string json = "{\"requestId\":\"req-001\",\"type\":\"GetPrinterRecoveryStatus\",\"timestampUtc\":\"2026-09-02T01:00:00Z\"}";
+
+        var parsed = WorkerCommandParser.TryParse(
+            json,
+            maxBytes: 8192,
+            out var command,
+            out var errorDetail,
+            out var requestId);
+
+        Assert.True(parsed);
+        Assert.Null(errorDetail);
+        Assert.NotNull(command);
+        Assert.Equal("req-001", requestId);
+        Assert.Equal("req-001", command.RequestId);
+        Assert.Equal(PrinterRecoveryCommandType.GetPrinterRecoveryStatus, command.Type);
+    }
+
+    [Fact]
+    public void Parser_ValidAttemptPrinterRecovery_ParsesSuccessfully()
+    {
+        const string json = "{\"requestId\":\"req-002\",\"type\":\"AttemptPrinterRecovery\",\"timestampUtc\":\"2026-09-02T01:05:00Z\"}";
+
+        var parsed = WorkerCommandParser.TryParse(
+            json,
+            maxBytes: 8192,
+            out var command,
+            out var errorDetail,
+            out var requestId);
+
+        Assert.True(parsed);
+        Assert.Null(errorDetail);
+        Assert.NotNull(command);
+        Assert.Equal("req-002", requestId);
+        Assert.Equal("req-002", command.RequestId);
+        Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, command.Type);
+    }
+
+    #endregion
+
+    #region 2. Command Parser Tests (Invalid Cases)
+
+    [Fact]
+    public void Parser_MalformedJson_ReturnsFalseAndError()
+    {
+        const string json = "{not-valid-json";
+
+        var parsed = WorkerCommandParser.TryParse(
+            json,
+            maxBytes: 8192,
+            out var command,
+            out var errorDetail,
+            out var requestId);
+
+        Assert.False(parsed);
+        Assert.Null(command);
+        Assert.NotNull(errorDetail);
+        Assert.Equal(string.Empty, requestId);
+    }
+
+    [Fact]
+    public void Parser_EmptyOrWhitespaceString_ReturnsFalseAndError()
+    {
+        var parsed1 = WorkerCommandParser.TryParse(
+            "",
+            maxBytes: 8192,
+            out var command1,
+            out var errorDetail1,
+            out var requestId1);
+
+        Assert.False(parsed1);
+        Assert.Null(command1);
+        Assert.NotNull(errorDetail1);
+        Assert.Equal(string.Empty, requestId1);
+
+        var parsed2 = WorkerCommandParser.TryParse(
+            "   \r\n",
+            maxBytes: 8192,
+            out var command2,
+            out var errorDetail2,
+            out var requestId2);
+
+        Assert.False(parsed2);
+        Assert.Null(command2);
+        Assert.NotNull(errorDetail2);
+        Assert.Equal(string.Empty, requestId2);
+    }
+
+    [Fact]
+    public void Parser_OversizedPayload_ReturnsFalseWithoutParsing()
+    {
+        var largePayload = "{\"requestId\":\"req-big\",\"type\":\"GetPrinterRecoveryStatus\",\"extra\":\""
+            + new string('a', 100) + "\"}";
+
+        var parsed = WorkerCommandParser.TryParse(
+            largePayload,
+            maxBytes: 50,
+            out var command,
+            out var errorDetail,
+            out var requestId);
+
+        Assert.False(parsed);
+        Assert.Null(command);
+        Assert.NotNull(errorDetail);
+        Assert.Equal(string.Empty, requestId);
+    }
+
+    [Fact]
+    public void Parser_UnknownCommandType_ReturnsFalseAndExtractsRequestId()
+    {
+        const string json = "{\"requestId\":\"req-unknown\",\"type\":\"UnknownCommand\"}";
+
+        var parsed = WorkerCommandParser.TryParse(
+            json,
+            maxBytes: 8192,
+            out var command,
+            out var errorDetail,
+            out var requestId);
+
+        Assert.False(parsed);
+        Assert.Null(command);
+        Assert.NotNull(errorDetail);
+        Assert.Equal("req-unknown", requestId);
+    }
+
+    [Fact]
+    public void Parser_MissingRequestId_ReturnsFalse()
+    {
+        const string json = "{\"type\":\"GetPrinterRecoveryStatus\"}";
+
+        var parsed = WorkerCommandParser.TryParse(
+            json,
+            maxBytes: 8192,
+            out var command,
+            out var errorDetail,
+            out var requestId);
+
+        Assert.False(parsed);
+        Assert.Null(command);
+        Assert.NotNull(errorDetail);
+        Assert.Equal(string.Empty, requestId);
+    }
+
+    #endregion
+
+    #region 3. Pipe Security Test (Windows)
+
+    [Fact]
+    public void CreatePipeSecurity_Windows_GrantsOnlyAuthorizedPrincipals()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var security = WorkerCommandPipeSecurity.CreatePipeSecurity();
+        Assert.NotNull(security);
+
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
+
+        bool foundAdmin = false;
+        bool foundSystem = false;
+        bool foundCurrentUser = false;
+        var currentIdentity = WindowsIdentity.GetCurrent();
+
+        foreach (PipeAccessRule rule in rules)
+        {
+            var sid = rule.IdentityReference as SecurityIdentifier;
+            Assert.NotNull(sid);
+
+            // Must NOT contain WorldSid (Everyone)
+            Assert.False(
+                sid.IsWellKnown(WellKnownSidType.WorldSid),
+                "PipeSecurity must not contain WorldSid (Everyone).");
+
+            // Must NOT contain AuthenticatedUserSid
+            Assert.False(
+                sid.IsWellKnown(WellKnownSidType.AuthenticatedUserSid),
+                "PipeSecurity must not contain AuthenticatedUserSid.");
+
+            if (sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid))
+            {
+                foundAdmin = true;
+                Assert.Equal(PipeAccessRights.ReadWrite, rule.PipeAccessRights & PipeAccessRights.ReadWrite);
+                Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+            }
+            else if (sid.IsWellKnown(WellKnownSidType.LocalSystemSid))
+            {
+                foundSystem = true;
+                Assert.Equal(PipeAccessRights.FullControl, rule.PipeAccessRights & PipeAccessRights.FullControl);
+                Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+            }
+            else if (currentIdentity.User != null && sid == currentIdentity.User)
+            {
+                foundCurrentUser = true;
+                Assert.Equal(PipeAccessRights.FullControl, rule.PipeAccessRights & PipeAccessRights.FullControl);
+                Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+            }
+        }
+
+        Assert.True(foundAdmin, "PipeSecurity must contain BUILTIN\\Administrators.");
+        Assert.True(foundSystem, "PipeSecurity must contain LocalSystem.");
+        if (currentIdentity.User != null)
+        {
+            Assert.True(foundCurrentUser, "PipeSecurity must contain current service identity.");
+        }
+    }
+
+    #endregion
+
+    #region 4. Dispatch Test: GetPrinterRecoveryStatus
+
+    [Fact]
+    public async Task ProcessRequestAsync_ValidGetPrinterRecoveryStatus_CallsGetStatusAsyncAndReturnsResult()
+    {
+        var service = CreateHostedService();
+
+        _recoveryServiceMock
+            .Setup(r => r.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PrinterRecoveryResult
+            {
+                RequestId = string.Empty,
+                Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
+                Outcome = PrinterRecoveryOutcome.Healthy,
+                SpoolerState = "Running",
+                PrinterState = "Healthy",
+                IssueKind = "None",
+                Message = "Printer is healthy.",
+                StartedAt = DateTime.UtcNow,
+                CompletedAt = DateTime.UtcNow
+            });
+
+        const string requestJson = "{\"requestId\":\"req-get-1\",\"type\":\"GetPrinterRecoveryStatus\"}\n";
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(requestJson));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal("req-get-1", result.RequestId);
+        Assert.Equal(PrinterRecoveryCommandType.GetPrinterRecoveryStatus, result.Type);
+        Assert.Equal(PrinterRecoveryOutcome.Healthy, result.Outcome);
+        Assert.Equal("Running", result.SpoolerState);
+
+        _recoveryServiceMock.Verify(r => r.GetStatusAsync(It.IsAny<CancellationToken>()), Times.Once);
+        _recoveryServiceMock.Verify(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()), Times.Never);
+
+        // Verify outputStream contains single-line JSON with newline
+        var responseString = Encoding.UTF8.GetString(outputStream.ToArray());
+        Assert.EndsWith("\n", responseString);
+
+        var deserialized = JsonSerializer.Deserialize<PrinterRecoveryResult>(
+            responseString.TrimEnd('\r', '\n'),
+            WorkerCommandParser.JsonOptions);
+        Assert.NotNull(deserialized);
+        Assert.Equal("req-get-1", deserialized.RequestId);
+        Assert.Equal(PrinterRecoveryOutcome.Healthy, deserialized.Outcome);
+    }
+
+    #endregion
+
+    #region 5. Dispatch Test: AttemptPrinterRecovery
+
+    [Fact]
+    public async Task ProcessRequestAsync_ValidAttemptPrinterRecovery_CallsAttemptRepairAsyncAndReturnsResult()
+    {
+        var service = CreateHostedService();
+
+        _recoveryServiceMock
+            .Setup(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PrinterRecoveryResult
+            {
+                RequestId = string.Empty,
+                Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
+                Outcome = PrinterRecoveryOutcome.Recovered,
+                Action = "RestartSpooler",
+                SpoolerState = "Running",
+                PrinterState = "Healthy",
+                IssueKind = "None",
+                Message = "Recovered after Spooler restart.",
+                StartedAt = DateTime.UtcNow,
+                CompletedAt = DateTime.UtcNow
+            });
+
+        const string requestJson = "{\"requestId\":\"req-repair-1\",\"type\":\"AttemptPrinterRecovery\"}\n";
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(requestJson));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal("req-repair-1", result.RequestId);
+        Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
+        Assert.Equal(PrinterRecoveryOutcome.Recovered, result.Outcome);
+        Assert.Equal("RestartSpooler", result.Action);
+
+        _recoveryServiceMock.Verify(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()), Times.Once);
+        _recoveryServiceMock.Verify(r => r.GetStatusAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    #endregion
+
+    #region 6. Invalid Request Tests (Never Calls Service)
+
+    [Theory]
+    [InlineData("{bad-json\n", "")]
+    [InlineData("{\"requestId\":\"req-unk\",\"type\":\"InvalidCommandType\"}\n", "req-unk")]
+    [InlineData("{\"type\":\"GetPrinterRecoveryStatus\"}\n", "")]
+    public async Task ProcessRequestAsync_InvalidPayload_DoesNotCallServiceAndReturnsInvalidRequest(
+        string requestPayload,
+        string expectedRequestId)
+    {
+        var service = CreateHostedService();
+
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(requestPayload));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(expectedRequestId, result.RequestId);
+        Assert.Equal(PrinterRecoveryOutcome.InvalidRequest, result.Outcome);
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        _recoveryServiceMock.Verify(r => r.GetStatusAsync(It.IsAny<CancellationToken>()), Times.Never);
+        _recoveryServiceMock.Verify(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()), Times.Never);
+
+        var responseString = Encoding.UTF8.GetString(outputStream.ToArray());
+        Assert.EndsWith("\n", responseString);
+    }
+
+    [Fact]
+    public async Task ProcessRequestAsync_OversizedPayload_DoesNotCallServiceAndReturnsInvalidRequest()
+    {
+        var smallSettings = new IpcSettings
+        {
+            WorkerCommandPipeName = "test-pipe",
+            MaxMessageBytes = 40
+        };
+        var service = new WorkerCommandPipeHostedService(
+            _loggerMock.Object,
+            _recoveryServiceMock.Object,
+            Options.Create(smallSettings));
+
+        var largeJson = "{\"requestId\":\"req-large\",\"type\":\"GetPrinterRecoveryStatus\",\"extra\":\"too large\"}\n";
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(largeJson));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(PrinterRecoveryOutcome.InvalidRequest, result.Outcome);
+        Assert.Contains("exceeded", result.Message, StringComparison.OrdinalIgnoreCase);
+
+        _recoveryServiceMock.Verify(r => r.GetStatusAsync(It.IsAny<CancellationToken>()), Times.Never);
+        _recoveryServiceMock.Verify(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    #endregion
+
+    #region 7. RequestId Preservation Test
+
+    [Fact]
+    public async Task ProcessRequestAsync_PreservesRequestId_AcrossRequestAndResponse()
+    {
+        var service = CreateHostedService();
+        const string customRequestId = "client-assigned-correlation-id-9876";
+
+        _recoveryServiceMock
+            .Setup(r => r.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PrinterRecoveryResult
+            {
+                RequestId = string.Empty, // Service doesn't know RequestId
+                Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
+                Outcome = PrinterRecoveryOutcome.Healthy,
+                Message = "All good"
+            });
+
+        var requestJson = $"{{\"requestId\":\"{customRequestId}\",\"type\":\"GetPrinterRecoveryStatus\"}}\n";
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(requestJson));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(customRequestId, result.RequestId);
+
+        var responseString = Encoding.UTF8.GetString(outputStream.ToArray());
+        var deserialized = JsonSerializer.Deserialize<PrinterRecoveryResult>(
+            responseString.TrimEnd('\r', '\n'),
+            WorkerCommandParser.JsonOptions);
+        Assert.NotNull(deserialized);
+        Assert.Equal(customRequestId, deserialized.RequestId);
+    }
+
+    #endregion
+
+    #region 8. End-to-End Pipe Client/Server Test
+
+    [Fact]
+    public async Task EndToEnd_PipeClientServer_ExecutesCommandAndClosesConnection()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var pipeName = "test-e2e-pipe-" + Guid.NewGuid().ToString("N");
+        var ipcSettings = new IpcSettings
+        {
+            WorkerCommandPipeName = pipeName,
+            MaxMessageBytes = 8192
+        };
+
+        _recoveryServiceMock
+            .Setup(r => r.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PrinterRecoveryResult
+            {
+                RequestId = string.Empty,
+                Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
+                Outcome = PrinterRecoveryOutcome.Healthy,
+                SpoolerState = "Running",
+                PrinterState = "Healthy",
+                IssueKind = "None",
+                Message = "Printer is ready."
+            });
+
+        var hostedService = new WorkerCommandPipeHostedService(
+            _loggerMock.Object,
+            _recoveryServiceMock.Object,
+            Options.Create(ipcSettings));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        // Start hosted service in background
+        var hostedServiceTask = hostedService.StartAsync(cts.Token);
+
+        // Allow pipe listener to initialize
+        await Task.Delay(100, cts.Token);
+
+        // Connect client
+        await using var clientStream = new NamedPipeClientStream(
+            ".",
+            pipeName,
+            PipeDirection.InOut,
+            PipeOptions.Asynchronous);
+
+        await clientStream.ConnectAsync(3000, cts.Token);
+        Assert.True(clientStream.IsConnected);
+
+        // Send single-line command
+        const string commandLine = "{\"requestId\":\"e2e-req-1\",\"type\":\"GetPrinterRecoveryStatus\"}\n";
+        var requestBytes = Encoding.UTF8.GetBytes(commandLine);
+        await clientStream.WriteAsync(requestBytes, cts.Token);
+        await clientStream.FlushAsync(cts.Token);
+
+        // Read single-line JSON response
+        using var reader = new StreamReader(clientStream, Encoding.UTF8, leaveOpen: true);
+        var responseLine = await reader.ReadLineAsync(cts.Token);
+
+        Assert.NotNull(responseLine);
+        Assert.False(string.IsNullOrWhiteSpace(responseLine));
+
+        var result = JsonSerializer.Deserialize<PrinterRecoveryResult>(responseLine, WorkerCommandParser.JsonOptions);
+        Assert.NotNull(result);
+        Assert.Equal("e2e-req-1", result.RequestId);
+        Assert.Equal(PrinterRecoveryCommandType.GetPrinterRecoveryStatus, result.Type);
+        Assert.Equal(PrinterRecoveryOutcome.Healthy, result.Outcome);
+
+        // Verify that after single response, the server closes/disconnects the pipe (next read yields EOF)
+        var nextLine = await reader.ReadLineAsync(cts.Token);
+        Assert.Null(nextLine);
+
+        // Stop hosted service
+        await hostedService.StopAsync(cts.Token);
+        await hostedServiceTask;
+    }
+
+    #endregion
+}
