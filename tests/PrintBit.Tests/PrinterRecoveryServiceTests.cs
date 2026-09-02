@@ -88,7 +88,10 @@ public class PrinterRecoveryServiceTests
         Assert.Equal(PrinterRecoveryOutcome.Healthy, result.Outcome);
         Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
         Assert.Null(result.Action);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
         Assert.Equal(PrinterHealthState.Healthy.ToString(), result.PrinterState);
         Assert.Equal(PrinterHealthIssueKind.None.ToString(), result.IssueKind);
         Assert.False(string.IsNullOrWhiteSpace(result.Message));
@@ -133,7 +136,10 @@ public class PrinterRecoveryServiceTests
         Assert.Equal(PrinterRecoveryOutcome.ManualInterventionRequired, result.Outcome);
         Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
         Assert.Null(result.Action);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
         Assert.Equal(PrinterHealthState.Fault.ToString(), result.PrinterState);
         Assert.Equal(PrinterHealthIssueKind.PhysicalFault.ToString(), result.IssueKind);
         Assert.False(string.IsNullOrWhiteSpace(result.Message));
@@ -190,7 +196,10 @@ public class PrinterRecoveryServiceTests
         Assert.Equal(PrinterRecoveryOutcome.Recovered, result.Outcome);
         Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
         Assert.Equal("RestartSpooler", result.Action);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
         Assert.Equal(PrinterHealthState.Healthy.ToString(), result.PrinterState);
         Assert.Equal(PrinterHealthIssueKind.None.ToString(), result.IssueKind);
         Assert.False(string.IsNullOrWhiteSpace(result.Message));
@@ -238,7 +247,10 @@ public class PrinterRecoveryServiceTests
         Assert.Equal(PrinterRecoveryOutcome.RestartFailed, result.Outcome);
         Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
         Assert.Equal("RestartSpooler", result.Action);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Equal("Service cannot be stopped", result.SpoolerState.ErrorMessage);
         Assert.Equal(PrinterHealthState.Offline.ToString(), result.PrinterState);
         Assert.Contains("Service cannot be stopped", result.Message);
 
@@ -276,7 +288,7 @@ public class PrinterRecoveryServiceTests
     }
 
     [Fact]
-    public async Task AttemptRepairAsync_WhenRecheckExpires_ReturnsManualInterventionRequired()
+    public async Task AttemptRepairAsync_WhenRecheckExpiresWithWindowsQueueFault_ReturnsRestartFailed()
     {
         // Arrange
         var fastSettings = new PrinterRecoverySettings
@@ -321,12 +333,85 @@ public class PrinterRecoveryServiceTests
         var result = await service.AttemptRepairAsync(CancellationToken.None);
 
         // Assert
-        Assert.Equal(PrinterRecoveryOutcome.ManualInterventionRequired, result.Outcome);
+        Assert.Equal(PrinterRecoveryOutcome.RestartFailed, result.Outcome);
         Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
         Assert.Equal("RestartSpooler", result.Action);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
         Assert.Equal(PrinterHealthState.Offline.ToString(), result.PrinterState);
         Assert.Equal(PrinterHealthIssueKind.WindowsQueueFault.ToString(), result.IssueKind);
+        Assert.Contains("recheck deadline", result.Message);
+
+        _spoolerControllerMock.Verify(s => s.RestartAsync(It.IsAny<CancellationToken>()), Times.Once);
+        _leaseMock.Verify(l => l.Dispose(), Times.Once);
+    }
+
+    [Fact]
+    public async Task AttemptRepairAsync_WhenRecheckExpiresWithPhysicalFault_ReturnsManualInterventionRequired()
+    {
+        // Arrange
+        var fastSettings = new PrinterRecoverySettings
+        {
+            ServiceName = "Spooler",
+            PrinterName = "EPSON L5290 Series",
+            SpoolerTransitionTimeoutSeconds = 30,
+            HealthRecheckTimeoutSeconds = 0,
+            HealthRecheckIntervalSeconds = 0
+        };
+
+        var initialDiagnostic = new PrinterHealthDiagnostic
+        {
+            PrinterState = PrinterHealthState.Offline,
+            IssueKind = PrinterHealthIssueKind.WindowsQueueFault,
+            WinSpoolDescription = "Printer offline"
+        };
+
+        var physicalFaultDiagnostic = new PrinterHealthDiagnostic
+        {
+            PrinterState = PrinterHealthState.Fault,
+            IssueKind = PrinterHealthIssueKind.PhysicalFault,
+            WinSpoolDescription = "Paper Jam"
+        };
+
+        _healthMonitorMock
+            .SetupSequence(h => h.GetDiagnostic("EPSON L5290 Series"))
+            .Returns(initialDiagnostic) // pre-restart check
+            .Returns(physicalFaultDiagnostic); // post-restart recheck
+
+        _spoolerControllerMock
+            .Setup(s => s.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpoolerStatusSnapshot
+            {
+                IsRunning = true,
+                Status = "Running"
+            });
+
+        _spoolerControllerMock
+            .Setup(s => s.RestartAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpoolerRestartResult
+            {
+                Success = true,
+                FinalStatus = "Running"
+            });
+
+        var service = CreateService(fastSettings);
+
+        // Act
+        var result = await service.AttemptRepairAsync(CancellationToken.None);
+
+        // Assert
+        Assert.Equal(PrinterRecoveryOutcome.ManualInterventionRequired, result.Outcome);
+        Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
+        Assert.Null(result.Action);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
+        Assert.Equal(PrinterHealthState.Fault.ToString(), result.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.PhysicalFault.ToString(), result.IssueKind);
+        Assert.Contains("physical printer fault detected", result.Message);
         Assert.Contains("Manual intervention required", result.Message);
 
         _spoolerControllerMock.Verify(s => s.RestartAsync(It.IsAny<CancellationToken>()), Times.Once);
@@ -363,7 +448,10 @@ public class PrinterRecoveryServiceTests
         Assert.Equal(PrinterRecoveryOutcome.Healthy, result.Outcome);
         Assert.Equal(PrinterRecoveryCommandType.GetPrinterRecoveryStatus, result.Type);
         Assert.Null(result.Action);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
         Assert.Equal(PrinterHealthState.Healthy.ToString(), result.PrinterState);
         Assert.Equal(PrinterHealthIssueKind.None.ToString(), result.IssueKind);
         Assert.False(string.IsNullOrWhiteSpace(result.Message));
@@ -402,7 +490,10 @@ public class PrinterRecoveryServiceTests
         Assert.Equal(PrinterRecoveryOutcome.ManualInterventionRequired, result.Outcome);
         Assert.Equal(PrinterRecoveryCommandType.GetPrinterRecoveryStatus, result.Type);
         Assert.Null(result.Action);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
         Assert.Equal(PrinterHealthState.Fault.ToString(), result.PrinterState);
         Assert.Equal(PrinterHealthIssueKind.PhysicalFault.ToString(), result.IssueKind);
         Assert.Contains("Paper Jam", result.Message);
@@ -410,3 +501,4 @@ public class PrinterRecoveryServiceTests
         _spoolerControllerMock.Verify(s => s.RestartAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
 }
+

@@ -51,4 +51,68 @@ public class PrinterRecoveryContractsTests
 
         Assert.Equal(expectedJson, json);
     }
+
+    [Fact]
+    public void PrinterRecoveryResult_WithSpoolerState_SerializesAsObjectSnapshot()
+    {
+        var result = new PrinterRecoveryResult
+        {
+            RequestId = "req-test-1",
+            Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
+            Outcome = PrinterRecoveryOutcome.Recovered,
+            Action = "RestartSpooler",
+            SpoolerState = new SpoolerStateDto
+            {
+                IsRunning = true,
+                Status = "Running",
+                ErrorMessage = null
+            },
+            PrinterState = "Healthy",
+            IssueKind = "None",
+            Message = "Recovered successfully.",
+            StartedAt = new DateTime(2026, 9, 2, 1, 0, 0, DateTimeKind.Utc),
+            CompletedAt = new DateTime(2026, 9, 2, 1, 0, 5, DateTimeKind.Utc)
+        };
+
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter(allowIntegerValues: false) }
+        };
+
+        var json = JsonSerializer.Serialize(result, options);
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.True(root.TryGetProperty("spoolerState", out var spoolerElem));
+        Assert.Equal(JsonValueKind.Object, spoolerElem.ValueKind);
+        Assert.True(spoolerElem.GetProperty("isRunning").GetBoolean());
+        Assert.Equal("Running", spoolerElem.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, spoolerElem.GetProperty("errorMessage").ValueKind);
+    }
+
+    [Fact]
+    public void PrinterRecoveryResult_WithNullSpoolerState_SerializesAsNull()
+    {
+        var result = new PrinterRecoveryResult
+        {
+            RequestId = "req-busy",
+            Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
+            Outcome = PrinterRecoveryOutcome.WorkerBusy,
+            SpoolerState = null
+        };
+
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter(allowIntegerValues: false) }
+        };
+
+        var json = JsonSerializer.Serialize(result, options);
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.True(root.TryGetProperty("spoolerState", out var spoolerElem));
+        Assert.Equal(JsonValueKind.Null, spoolerElem.ValueKind);
+    }
 }

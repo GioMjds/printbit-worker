@@ -33,6 +33,13 @@ public enum PrinterRecoveryOutcome
     InvalidRequest
 }
 
+public sealed class SpoolerStateDto
+{
+    public bool IsRunning { get; init; }
+    public string Status { get; init; } = string.Empty;
+    public string? ErrorMessage { get; init; }
+}
+
 public sealed class PrinterRecoveryCommand
 {
     public string RequestId { get; init; } = string.Empty;
@@ -46,10 +53,11 @@ public sealed class PrinterRecoveryResult
     public PrinterRecoveryCommandType Type { get; init; }
     public PrinterRecoveryOutcome Outcome { get; init; }
     public string? Action { get; init; }
-    public string? SpoolerState { get; init; }
+    public SpoolerStateDto? SpoolerState { get; init; }
     public string? PrinterState { get; init; }
     public string? IssueKind { get; init; }
     public string? Message { get; init; }
     public DateTime StartedAt { get; init; }
     public DateTime CompletedAt { get; init; }
 }
+

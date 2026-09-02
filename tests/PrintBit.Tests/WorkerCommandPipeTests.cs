@@ -324,7 +324,12 @@ public class WorkerCommandPipeTests
                 RequestId = string.Empty,
                 Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
                 Outcome = PrinterRecoveryOutcome.Healthy,
-                SpoolerState = "Running",
+                SpoolerState = new SpoolerStateDto
+                {
+                    IsRunning = true,
+                    Status = "Running",
+                    ErrorMessage = null
+                },
                 PrinterState = "Healthy",
                 IssueKind = "None",
                 Message = "Printer is healthy.",
@@ -342,7 +347,10 @@ public class WorkerCommandPipeTests
         Assert.Equal("req-get-1", result.RequestId);
         Assert.Equal(PrinterRecoveryCommandType.GetPrinterRecoveryStatus, result.Type);
         Assert.Equal(PrinterRecoveryOutcome.Healthy, result.Outcome);
-        Assert.Equal("Running", result.SpoolerState);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
 
         _recoveryServiceMock.Verify(r => r.GetStatusAsync(It.IsAny<CancellationToken>()), Times.Once);
         _recoveryServiceMock.Verify(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()), Times.Never);
@@ -357,6 +365,10 @@ public class WorkerCommandPipeTests
         Assert.NotNull(deserialized);
         Assert.Equal("req-get-1", deserialized.RequestId);
         Assert.Equal(PrinterRecoveryOutcome.Healthy, deserialized.Outcome);
+        Assert.NotNull(deserialized.SpoolerState);
+        Assert.True(deserialized.SpoolerState.IsRunning);
+        Assert.Equal("Running", deserialized.SpoolerState.Status);
+        Assert.Null(deserialized.SpoolerState.ErrorMessage);
     }
 
     #endregion
@@ -376,7 +388,12 @@ public class WorkerCommandPipeTests
                 Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                 Outcome = PrinterRecoveryOutcome.Recovered,
                 Action = "RestartSpooler",
-                SpoolerState = "Running",
+                SpoolerState = new SpoolerStateDto
+                {
+                    IsRunning = true,
+                    Status = "Running",
+                    ErrorMessage = null
+                },
                 PrinterState = "Healthy",
                 IssueKind = "None",
                 Message = "Recovered after Spooler restart.",
@@ -395,6 +412,10 @@ public class WorkerCommandPipeTests
         Assert.Equal(PrinterRecoveryCommandType.AttemptPrinterRecovery, result.Type);
         Assert.Equal(PrinterRecoveryOutcome.Recovered, result.Outcome);
         Assert.Equal("RestartSpooler", result.Action);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
 
         _recoveryServiceMock.Verify(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()), Times.Once);
         _recoveryServiceMock.Verify(r => r.GetStatusAsync(It.IsAny<CancellationToken>()), Times.Never);
@@ -521,7 +542,12 @@ public class WorkerCommandPipeTests
                 RequestId = string.Empty,
                 Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
                 Outcome = PrinterRecoveryOutcome.Healthy,
-                SpoolerState = "Running",
+                SpoolerState = new SpoolerStateDto
+                {
+                    IsRunning = true,
+                    Status = "Running",
+                    ErrorMessage = null
+                },
                 PrinterState = "Healthy",
                 IssueKind = "None",
                 Message = "Printer is ready."
@@ -568,6 +594,10 @@ public class WorkerCommandPipeTests
         Assert.Equal("e2e-req-1", result.RequestId);
         Assert.Equal(PrinterRecoveryCommandType.GetPrinterRecoveryStatus, result.Type);
         Assert.Equal(PrinterRecoveryOutcome.Healthy, result.Outcome);
+        Assert.NotNull(result.SpoolerState);
+        Assert.True(result.SpoolerState.IsRunning);
+        Assert.Equal("Running", result.SpoolerState.Status);
+        Assert.Null(result.SpoolerState.ErrorMessage);
 
         // Verify that after single response, the server closes/disconnects the pipe (next read yields EOF)
         var nextLine = await reader.ReadLineAsync(cts.Token);

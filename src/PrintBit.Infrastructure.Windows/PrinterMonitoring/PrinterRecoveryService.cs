@@ -84,7 +84,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
             Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
             Outcome = outcome,
             Action = null,
-            SpoolerState = spoolerStatus.Status,
+            SpoolerState = MapSpoolerState(spoolerStatus),
             PrinterState = diagnostic.PrinterState.ToString(),
             IssueKind = diagnostic.IssueKind.ToString(),
             Message = message,
@@ -132,7 +132,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.Healthy,
                     Action = null,
-                    SpoolerState = spoolerStatus.Status,
+                    SpoolerState = MapSpoolerState(spoolerStatus),
                     PrinterState = diagnostic.PrinterState.ToString(),
                     IssueKind = diagnostic.IssueKind.ToString(),
                     Message = "Printer is healthy. No recovery action needed.",
@@ -161,7 +161,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.ManualInterventionRequired,
                     Action = null,
-                    SpoolerState = spoolerStatus.Status,
+                    SpoolerState = MapSpoolerState(spoolerStatus),
                     PrinterState = diagnostic.PrinterState.ToString(),
                     IssueKind = diagnostic.IssueKind.ToString(),
                     Message = physicalMsg,
@@ -189,7 +189,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.RestartFailed,
                     Action = RestartSpoolerAction,
-                    SpoolerState = restartResult.FinalStatus,
+                    SpoolerState = MapSpoolerState(restartResult),
                     PrinterState = diagnostic.PrinterState.ToString(),
                     IssueKind = diagnostic.IssueKind.ToString(),
                     Message = errorMsg,
@@ -233,7 +233,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.Recovered,
                     Action = RestartSpoolerAction,
-                    SpoolerState = restartResult.FinalStatus,
+                    SpoolerState = MapSpoolerState(restartResult),
                     PrinterState = latestDiagnostic.PrinterState.ToString(),
                     IssueKind = latestDiagnostic.IssueKind.ToString(),
                     Message = "Print Spooler restarted successfully and printer health restored.",
@@ -241,18 +241,37 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     CompletedAt = DateTime.UtcNow
                 };
             }
-            else
+            else if (latestDiagnostic.IssueKind == PrinterHealthIssueKind.PhysicalFault)
             {
-                var failureMsg = $"Print Spooler restarted, but printer remained unhealthy ({latestDiagnostic.PrinterState}, {latestDiagnostic.IssueKind}). Manual intervention required.";
-                _logger?.LogWarning("AttemptRepairAsync: {Message}", failureMsg);
+                var physicalMsg = $"Print Spooler was restarted, but physical printer fault detected ({latestDiagnostic.PrinterState}, {latestDiagnostic.IssueKind}). Manual intervention required.";
+                _logger?.LogWarning("AttemptRepairAsync: {Message}", physicalMsg);
 
                 return new PrinterRecoveryResult
                 {
                     RequestId = string.Empty,
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.ManualInterventionRequired,
+                    Action = null,
+                    SpoolerState = MapSpoolerState(restartResult),
+                    PrinterState = latestDiagnostic.PrinterState.ToString(),
+                    IssueKind = latestDiagnostic.IssueKind.ToString(),
+                    Message = physicalMsg,
+                    StartedAt = startedAt,
+                    CompletedAt = DateTime.UtcNow
+                };
+            }
+            else
+            {
+                var failureMsg = $"Print Spooler was restarted, but printer remained unhealthy ({latestDiagnostic.PrinterState}, {latestDiagnostic.IssueKind}) after recheck deadline.";
+                _logger?.LogWarning("AttemptRepairAsync: {Message}", failureMsg);
+
+                return new PrinterRecoveryResult
+                {
+                    RequestId = string.Empty,
+                    Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
+                    Outcome = PrinterRecoveryOutcome.RestartFailed,
                     Action = RestartSpoolerAction,
-                    SpoolerState = restartResult.FinalStatus,
+                    SpoolerState = MapSpoolerState(restartResult),
                     PrinterState = latestDiagnostic.PrinterState.ToString(),
                     IssueKind = latestDiagnostic.IssueKind.ToString(),
                     Message = failureMsg,
@@ -262,6 +281,22 @@ public class PrinterRecoveryService : IPrinterRecoveryService
             }
         }
     }
+
+    private static SpoolerStateDto MapSpoolerState(SpoolerStatusSnapshot snapshot) =>
+        new()
+        {
+            IsRunning = snapshot.IsRunning,
+            Status = snapshot.Status,
+            ErrorMessage = snapshot.ErrorMessage
+        };
+
+    private static SpoolerStateDto MapSpoolerState(SpoolerRestartResult restartResult) =>
+        new()
+        {
+            IsRunning = string.Equals(restartResult.FinalStatus, "Running", StringComparison.OrdinalIgnoreCase),
+            Status = restartResult.FinalStatus,
+            ErrorMessage = restartResult.Error
+        };
 
     private string ResolvePrinterName()
     {

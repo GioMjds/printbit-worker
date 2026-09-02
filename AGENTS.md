@@ -194,7 +194,7 @@ Each connection receives one JSON line, dispatches one command, writes one singl
 | `type` | Yes | `GetPrinterRecoveryStatus` or `AttemptPrinterRecovery` |
 | `outcome` | Yes | `healthy`, `recovered`, `manual_intervention_required`, `worker_busy`, `restart_failed`, or `invalid_request` |
 | `action` | No | Executed repair action (e.g., `RestartSpooler` or null) |
-| `spoolerState` | No | Spooler service status snapshot |
+| `spoolerState` | No | Spooler service status snapshot: `{ "isRunning": bool, "status": string, "errorMessage": string? }` |
 | `printerState` | No | Typed printer state (`Healthy`, `Offline`, `Fault`, etc.) |
 | `issueKind` | No | Typed issue classification (`None`, `PhysicalFault`, `WindowsQueueFault`) |
 | `message` | No | User-safe explanation or error message |
