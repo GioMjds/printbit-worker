@@ -226,8 +226,9 @@ Dependency direction:
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
 | `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, read-only typed health diagnostics (`GetDiagnostic`), and recovery routines |
 | `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
-| `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
-| `IPrinterRecoveryService` / `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; concrete service and DI registration follow in the recovery-control-plane rollout |
+| `IPrinterRecoveryService` / `PrinterRecoveryService` | Infrastructure / Infrastructure.Windows | Printer recovery service orchestrating typed diagnostics, physical fault avoidance, and bounded native Spooler restart |
+| `IPrintSpoolerController` / `ServiceControllerSpoolerController` | Infrastructure.Windows | Native Windows ServiceController implementation managing Spooler service status and clean restarts |
+| `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; concrete service and DI registration follow in the recovery-control-plane rollout |
 | `JobOrchestrator` | Infrastructure | Counts and selects pages, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
 
@@ -340,7 +341,7 @@ Reset() from any state -> Idle
 - Add values to `Esp32MessageType` and update parser/docs.
 - Add `Esp32Command` constants and update docs.
 - Extend active non-stub classes.
-- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, whole-document dispatch, page-count confidence, print verification behavior, and printer pre-flight/recovery status checking.
+- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, whole-document dispatch, page-count confidence, print verification behavior, printer pre-flight/recovery status checking, and bounded native spooler recovery.
 - Add new `IOptions<T>` config models in `PrintBit.Shared`.
 - Extend `HardwareSettings` and sync docs.
 
