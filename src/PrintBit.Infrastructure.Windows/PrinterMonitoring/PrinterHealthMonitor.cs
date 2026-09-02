@@ -263,30 +263,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         return false;
     }
 
-    public async Task RecoverAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            _logger.LogWarning("Executing printer recovery spooler restarts...");
-            KillProcess("SumatraPDF");
-            KillEpsonProcesses();
-            await RestartSpoolerAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Recovery failed");
-        }
-    }
-
-    private void KillEpsonProcesses()
-    {
-        string[] epsonExes = { "E_YATIYRE", "E_YARNYRE", "E_S11RPB", "E_YBCSYRE" };
-        foreach (var name in epsonExes)
-        {
-            KillProcess(name);
-        }
-    }
-
     public (bool JobExists, uint StatusMask, string JobStatus, int PagesPrinted, int TotalPages, string? JobId) QueryJobStatus(
         string printerName,
         string documentName)
@@ -708,52 +684,5 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             // ignored
         }
         return (found, targetPid, foundTitle, foundContent);
-    }
-
-    private void KillProcess(string name)
-    {
-        var processes = Process.GetProcessesByName(name);
-        foreach (var p in processes)
-        {
-            using (p)
-            {
-                try { p.Kill(true); } catch { }
-            }
-        }
-    }
-
-    private async Task RestartSpoolerAsync()
-    {
-        using var stop = Process.Start(new ProcessStartInfo 
-        { 
-            FileName = "cmd.exe", 
-            Arguments = "/c net stop spooler", 
-            CreateNoWindow = true, 
-            UseShellExecute = false 
-        });
-        if (stop is not null)
-        {
-            await stop.WaitForExitAsync();
-            if (stop.ExitCode != 0)
-            {
-                _logger.LogWarning("Failed to stop spooler service (exit code: {ExitCode}). Make sure the service is running with Administrative privileges.", stop.ExitCode);
-            }
-        }
-        await Task.Delay(2000);
-        using var start = Process.Start(new ProcessStartInfo 
-        { 
-            FileName = "cmd.exe", 
-            Arguments = "/c net start spooler", 
-            CreateNoWindow = true, 
-            UseShellExecute = false 
-        });
-        if (start is not null)
-        {
-            await start.WaitForExitAsync();
-            if (start.ExitCode != 0)
-            {
-                _logger.LogWarning("Failed to start spooler service (exit code: {ExitCode}). Make sure the service is running with Administrative privileges.", start.ExitCode);
-            }
-        }
     }
 }

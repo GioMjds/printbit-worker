@@ -13,7 +13,6 @@ public interface IPrinterHealthMonitor
         string printerName,
         int timeoutSeconds,
         CancellationToken cancellationToken);
-    Task RecoverAsync(CancellationToken cancellationToken);
     (bool JobExists, uint StatusMask, string JobStatus, int PagesPrinted, int TotalPages, string? JobId) QueryJobStatus(
         string printerName,
         string documentName);

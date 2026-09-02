@@ -192,10 +192,167 @@ public class JobOrchestratorTests
         Assert.Equal(PrintFailureStage.Validation, result.FailureStage);
     }
 
+    [Fact]
+    public async Task ProcessJobAsync_WhenRecoveryLeaseIsHeld_WaitsForReleaseBeforeDispatch()
+    {
+        var tempPdf = CreatePdf(pageCount: 1);
+        try
+        {
+            var coordinator = new PrintOperationCoordinator();
+            var acquired = coordinator.TryAcquireRecovery(out var recoveryLease);
+            Assert.True(acquired);
+            Assert.NotNull(recoveryLease);
+
+            var healthMock = CreateHealthyMonitor();
+            var dispatched = new TaskCompletionSource<bool>();
+            var printerMock = new Mock<IDocumentPrinter>();
+            printerMock.Setup(p => p.PrintDocumentAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<IReadOnlyList<int>>(),
+                    It.IsAny<PrintJobSettings>(),
+                    It.IsAny<Func<int, int, Task>>(),
+                    It.IsAny<Func<string, Task>>(),
+                    It.IsAny<Func<Task>>(),
+                    It.IsAny<CancellationToken>()))
+                .Callback(() => dispatched.TrySetResult(true))
+                .ReturnsAsync(new DocumentPrintResult
+                {
+                    State = PagePrintState.Completed,
+                    PagesPrinted = 1,
+                    TotalPages = 1,
+                    PageCountConfidence = "confirmed"
+                });
+
+            var events = new List<WorkerPrintEvent>();
+            var eventPipeMock = CreateEventPipe(events);
+            var sut = CreateSut(healthMock.Object, printerMock.Object, eventPipeMock.Object, coordinator);
+
+            var processTask = sut.ProcessJobAsync(
+                new PrintJobRequest
+                {
+                    FilePath = tempPdf,
+                    PrinterName = "TestPrinter",
+                    Settings = new PrintJobSettings { Copies = 1 }
+                },
+                Path.ChangeExtension(tempPdf, ".json"),
+                CancellationToken.None);
+
+            await Task.Delay(100);
+
+            Assert.False(dispatched.Task.IsCompleted);
+            Assert.Empty(events);
+            printerMock.Verify(p => p.PrintDocumentAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<int>(),
+                It.IsAny<IReadOnlyList<int>>(),
+                It.IsAny<PrintJobSettings>(),
+                It.IsAny<Func<int, int, Task>>(),
+                It.IsAny<Func<string, Task>>(),
+                It.IsAny<Func<Task>>(),
+                It.IsAny<CancellationToken>()), Times.Never);
+
+            recoveryLease.Dispose();
+
+            var result = await processTask;
+            Assert.True(result.Success);
+            Assert.True(dispatched.Task.IsCompleted);
+            printerMock.Verify(p => p.PrintDocumentAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<int>(),
+                It.IsAny<IReadOnlyList<int>>(),
+                It.IsAny<PrintJobSettings>(),
+                It.IsAny<Func<int, int, Task>>(),
+                It.IsAny<Func<string, Task>>(),
+                It.IsAny<Func<Task>>(),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
+    [Fact]
+    public async Task ProcessJobAsync_WhilePrintJobIsActive_TryAcquireRecoveryReturnsBusy()
+    {
+        var tempPdf = CreatePdf(pageCount: 1);
+        try
+        {
+            var coordinator = new PrintOperationCoordinator();
+            var healthMock = CreateHealthyMonitor();
+            var printEntered = new TaskCompletionSource<bool>();
+            var allowPrintToFinish = new TaskCompletionSource<bool>();
+
+            bool? recoveryAcquisitionDuringPrint = null;
+            IDisposable? recoveryLeaseDuringPrint = null;
+
+            var printerMock = new Mock<IDocumentPrinter>();
+            printerMock.Setup(p => p.PrintDocumentAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<IReadOnlyList<int>>(),
+                    It.IsAny<PrintJobSettings>(),
+                    It.IsAny<Func<int, int, Task>>(),
+                    It.IsAny<Func<string, Task>>(),
+                    It.IsAny<Func<Task>>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns(async () =>
+                {
+                    printEntered.TrySetResult(true);
+                    recoveryAcquisitionDuringPrint = coordinator.TryAcquireRecovery(out recoveryLeaseDuringPrint);
+                    await allowPrintToFinish.Task;
+                    return new DocumentPrintResult
+                    {
+                        State = PagePrintState.Completed,
+                        PagesPrinted = 1,
+                        TotalPages = 1,
+                        PageCountConfidence = "confirmed"
+                    };
+                });
+
+            var events = new List<WorkerPrintEvent>();
+            var eventPipeMock = CreateEventPipe(events);
+            var sut = CreateSut(healthMock.Object, printerMock.Object, eventPipeMock.Object, coordinator);
+
+            var processTask = sut.ProcessJobAsync(
+                new PrintJobRequest
+                {
+                    FilePath = tempPdf,
+                    PrinterName = "TestPrinter",
+                    Settings = new PrintJobSettings { Copies = 1 }
+                },
+                Path.ChangeExtension(tempPdf, ".json"),
+                CancellationToken.None);
+
+            await printEntered.Task;
+            Assert.False(recoveryAcquisitionDuringPrint);
+            Assert.Null(recoveryLeaseDuringPrint);
+
+            allowPrintToFinish.TrySetResult(true);
+            var result = await processTask;
+            Assert.True(result.Success);
+
+            var acquiredAfterPrint = coordinator.TryAcquireRecovery(out var leaseAfterPrint);
+            Assert.True(acquiredAfterPrint);
+            Assert.NotNull(leaseAfterPrint);
+            leaseAfterPrint.Dispose();
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
     private static JobOrchestrator CreateSut(
         IPrinterHealthMonitor healthMonitor,
         IDocumentPrinter documentPrinter,
-        IWorkerEventPipeClient eventPipe)
+        IWorkerEventPipeClient eventPipe,
+        IPrinterOperationCoordinator? coordinator = null)
     {
         return new JobOrchestrator(
             NullLogger<JobOrchestrator>.Instance,
@@ -207,7 +364,8 @@ public class JobOrchestratorTests
             }),
             documentPrinter,
             healthMonitor,
-            eventPipe);
+            eventPipe,
+            coordinator ?? new PrintOperationCoordinator());
     }
 
     private static Mock<IPrinterHealthMonitor> CreateHealthyMonitor()

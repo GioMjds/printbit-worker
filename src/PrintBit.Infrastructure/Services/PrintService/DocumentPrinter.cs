@@ -103,7 +103,6 @@ public sealed class DocumentPrinter : IDocumentPrinter
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 try { process.Kill(true); } catch { }
-                await _healthMonitor.RecoverAsync(cancellationToken);
                 return Failed(PrintFailureStage.Timeout, "Sumatra process timeout", pages.Count);
             }
 

@@ -215,6 +215,47 @@ public class DocumentPrinterTests
         }
     }
 
+    [Fact]
+    public async Task PrintDocumentAsync_SumatraTimeout_ReturnsTimeoutFailureWithoutRecovery()
+    {
+        var dummyExe = GetSleepingDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var healthMock = new Mock<IPrinterHealthMonitor>(MockBehavior.Strict);
+            var sut = new DocumentPrinter(
+                NullLogger<DocumentPrinter>.Instance,
+                Options.Create(new HardwareSettings
+                {
+                    SumatraPath = dummyExe,
+                    PrintTimeoutSeconds = 1,
+                    PostClearGuardDelaySeconds = 0
+                }),
+                healthMock.Object);
+
+            var result = await sut.PrintDocumentAsync(
+                tempPdf,
+                "TestPrinter",
+                1,
+                [1, 2, 3],
+                new PrintJobSettings(),
+                (_, _) => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
+                CancellationToken.None);
+
+            Assert.Equal(PagePrintState.Failed, result.State);
+            Assert.Equal(PrintFailureStage.Timeout, result.FailureStage);
+            Assert.Equal("Sumatra process timeout", result.ErrorMessage);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
     private static DocumentPrinter CreateSut(string sumatraPath, IPrinterHealthMonitor healthMonitor)
     {
         return new DocumentPrinter(
@@ -237,6 +278,28 @@ public class DocumentPrinterTests
 
         var sourcePath = Path.Combine(tempDir, "dummy_sumatra.cs");
         File.WriteAllText(sourcePath, "class Program { static void Main() {} }");
+
+        var cscPath = @"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe";
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = cscPath,
+            Arguments = $"/out:\"{exePath}\" \"{sourcePath}\"",
+            CreateNoWindow = true,
+            UseShellExecute = false
+        });
+        process?.WaitForExit();
+        return exePath;
+    }
+
+    private static string GetSleepingDummyExecutablePath()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "PrintBitDocumentPrinterTests");
+        Directory.CreateDirectory(tempDir);
+        var exePath = Path.Combine(tempDir, "dummy_sumatra_sleep.exe");
+        if (File.Exists(exePath)) return exePath;
+
+        var sourcePath = Path.Combine(tempDir, "dummy_sumatra_sleep.cs");
+        File.WriteAllText(sourcePath, "class Program { static void Main() { System.Threading.Thread.Sleep(10000); } }");
 
         var cscPath = @"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe";
         var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo

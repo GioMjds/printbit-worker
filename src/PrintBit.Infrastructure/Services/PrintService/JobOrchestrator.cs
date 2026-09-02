@@ -13,19 +13,22 @@ public sealed class JobOrchestrator : IJobOrchestrator
     private readonly IDocumentPrinter _documentPrinter;
     private readonly IPrinterHealthMonitor _healthMonitor;
     private readonly IWorkerEventPipeClient _eventPipe;
+    private readonly IPrinterOperationCoordinator _coordinator;
 
     public JobOrchestrator(
         ILogger<JobOrchestrator> logger,
         IOptions<HardwareSettings> options,
         IDocumentPrinter documentPrinter,
         IPrinterHealthMonitor healthMonitor,
-        IWorkerEventPipeClient eventPipe)
+        IWorkerEventPipeClient eventPipe,
+        IPrinterOperationCoordinator coordinator)
     {
         _logger = logger;
         _settings = options.Value;
         _documentPrinter = documentPrinter;
         _healthMonitor = healthMonitor;
         _eventPipe = eventPipe;
+        _coordinator = coordinator;
     }
 
     public async Task<PrintJobResult> ProcessJobAsync(
@@ -33,6 +36,8 @@ public sealed class JobOrchestrator : IJobOrchestrator
         string jsonFilePath,
         CancellationToken cancellationToken)
     {
+        using var printLease = await _coordinator.AcquirePrintAsync(cancellationToken);
+
         _ = jsonFilePath;
         var fileName = Path.GetFileName(request.FilePath);
         var (transactionId, spoolerCorrelationKey) =
