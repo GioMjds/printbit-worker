@@ -283,6 +283,12 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "PipeName": "printbit-node-errors",
     "MaxMessageBytes": 8192,
     "WorkerReturnPipeName": "printbit-worker-events"
+  },
+  "PrinterRecoverySettings": {
+    "ServiceName": "Spooler",
+    "SpoolerTransitionTimeoutSeconds": 30,
+    "HealthRecheckTimeoutSeconds": 10,
+    "HealthRecheckIntervalSeconds": 2
   }
 }
 ```
