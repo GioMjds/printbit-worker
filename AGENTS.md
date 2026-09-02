@@ -227,6 +227,7 @@ Dependency direction:
 | `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, and recovery routines |
 | `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
+| `IPrinterRecoveryService` / `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; concrete service and DI registration follow in the recovery-control-plane rollout |
 | `JobOrchestrator` | Infrastructure | Counts and selects pages, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
 
