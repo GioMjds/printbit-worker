@@ -8,7 +8,7 @@ using System.Text;
 namespace PrintBit.Infrastructure.Services.DocumentConversion;
 
 /// <summary>
-/// Converts standard image files (.jpg, .jpeg, .png, .webp, .bmp, .gif) to a standard single-page PDF 1.4 document.
+/// Converts Windows GDI+-supported image files (.jpg, .jpeg, .png, .bmp, .gif) to a standard single-page PDF 1.4 document.
 /// Performs proportional scaling within printable margins and generates self-contained PDF objects completely offline.
 /// </summary>
 public static class ImageToPdfConverter

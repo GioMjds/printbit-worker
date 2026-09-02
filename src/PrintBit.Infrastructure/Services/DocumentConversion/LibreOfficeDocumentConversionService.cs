@@ -15,7 +15,7 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
 {
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"
+        ".jpg", ".jpeg", ".png", ".bmp", ".gif"
     };
 
     private static readonly HashSet<string> OfficeExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -268,6 +268,9 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
                 };
             }
 
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+
             try
             {
                 await process.WaitForExitAsync(linkedCts.Token);
@@ -292,10 +295,11 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
                 throw;
             }
 
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+
             if (process.ExitCode != 0)
             {
-                var stderr = await process.StandardError.ReadToEndAsync(cancellationToken);
-                var stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
                 var errDetail = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim() : (!string.IsNullOrWhiteSpace(stdout) ? stdout.Trim() : $"Exit code {process.ExitCode}");
                 sw.Stop();
                 _logger.LogError("LibreOffice conversion failed for {SourcePath}: {Error}", request.SourcePath, errDetail);

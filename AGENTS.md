@@ -306,6 +306,8 @@ builder.Services.Configure<HardwareSettings>(
     builder.Configuration.GetSection("HardwareSettings"));
 builder.Services.Configure<IpcSettings>(
     builder.Configuration.GetSection("IpcSettings"));
+builder.Services.Configure<DocumentConversionSettings>(
+    builder.Configuration.GetSection("DocumentConversionSettings"));
 builder.Services.Configure<PowerSettings>(
     builder.Configuration.GetSection("PowerSettings"));
 builder.Services.Configure<PrinterRecoverySettings>(
@@ -317,6 +319,8 @@ builder.Services.AddWindowsService(options =>
 });
 
 builder.Services.AddHostedService<ErrorPipeHostedService>();
+builder.Services.AddSingleton<IDocumentConversionService, LibreOfficeDocumentConversionService>();
+builder.Services.AddHostedService<DocumentConversionPipeHostedService>();
 
 // Printer monitoring and whole-document spooler dispatch
 builder.Services.AddSingleton<PrinterHealthMonitor>();
@@ -373,6 +377,13 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "SpoolerTransitionTimeoutSeconds": 30,
     "HealthRecheckTimeoutSeconds": 10,
     "HealthRecheckIntervalSeconds": 2
+  }
+  ,"DocumentConversionSettings": {
+    "SofficePath": "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+    "DefaultTimeoutSeconds": 60,
+    "PipeName": "printbit-document-conversion",
+    "UserProfileDirectory": "C:\\ProgramData\\PrintBit\\lo-profile",
+    "DefaultOutputDirectory": "C:\\ProgramData\\PrintBit\\converted"
   }
 }
 ```

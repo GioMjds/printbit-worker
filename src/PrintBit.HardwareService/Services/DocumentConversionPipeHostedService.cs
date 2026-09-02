@@ -47,7 +47,7 @@ public sealed class DocumentConversionPipeHostedService : BackgroundService
         {
             try
             {
-                await using var server = NamedPipeServerFactory.Create(
+                await using var server = NamedPipeServerFactory.CreateForCurrentUserAndAdministrators(
                     _settings.PipeName,
                     PipeDirection.InOut,
                     maxNumberOfServerInstances: 1,
