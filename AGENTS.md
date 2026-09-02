@@ -224,7 +224,7 @@ Dependency direction:
 |---|---|---|
 | `PrintQueueWatcher` | HardwareService | Watches queue directory, delegates to `IJobOrchestrator`, and cleans up sidecar files |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
-| `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, and recovery routines |
+| `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, read-only typed health diagnostics (`GetDiagnostic`), and recovery routines |
 | `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
 | `WorkerEventPipeClient` | Infrastructure | Sends print lifecycle events to Node via return pipe |
 | `IPrinterRecoveryService` / `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; concrete service and DI registration follow in the recovery-control-plane rollout |
