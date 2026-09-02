@@ -78,6 +78,54 @@ public class PrinterHealthMonitorTests
             MonitorPrinterAsync(cancellationToken);
     }
 
+    private sealed class DiagnosticPrinterHealthMonitor : PrinterHealthMonitor
+    {
+        public bool WinSpoolAvailable { get; init; } = true;
+        public uint WinSpoolStatus { get; init; }
+        public string WinSpoolDescription { get; init; } = "READY";
+        public bool WmiAvailable { get; init; } = true;
+        public bool WmiOffline { get; init; }
+        public int DetectedErrorState { get; init; }
+        public int ExtendedPrinterStatus { get; init; } = 3;
+        public string? EpsonPopupText { get; init; }
+
+        public DiagnosticPrinterHealthMonitor()
+            : base(
+                NullLogger<PrinterHealthMonitor>.Instance,
+                Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
+                Mock.Of<IWorkerEventPipeClient>())
+        {
+        }
+
+        protected override bool TryGetWinSpoolStatus(
+            string printerName,
+            out uint status,
+            out string description)
+        {
+            status = WinSpoolStatus;
+            description = WinSpoolDescription;
+            return WinSpoolAvailable;
+        }
+
+        protected override bool TryReadMonitorStatus(
+            string printerName,
+            out bool isOffline,
+            out int detectedErrorState,
+            out int extendedPrinterStatus)
+        {
+            isOffline = WmiOffline;
+            detectedErrorState = DetectedErrorState;
+            extendedPrinterStatus = ExtendedPrinterStatus;
+            return WmiAvailable;
+        }
+
+        protected override (bool HasPopup, int ProcessId, string WindowTitle, string Content)
+            CheckEpsonStatusMonitorPopup(string printerName) =>
+            EpsonPopupText is null
+                ? (false, 0, string.Empty, string.Empty)
+                : (true, 123, "EPSON Status Monitor 3", EpsonPopupText);
+    }
+
     [Fact]
     public async Task WaitForPrinterHealthyAsync_StopsOnCancellation()
     {
@@ -168,5 +216,159 @@ public class PrinterHealthMonitorTests
         Assert.Equal("EPSON L5290 Series", printerError.PrinterName);
         Assert.Equal("hardware_error", printerError.FailureStage);
         Assert.Contains("No Paper", printerError.Message);
+    }
+
+    [Fact]
+    public void GetDiagnostic_HealthyProbes_ReturnsHealthyWithoutIssue()
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor()
+            .GetDiagnostic("EPSON L5290 Series");
+
+        Assert.Equal(PrinterHealthState.Healthy, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.None, diagnostic.IssueKind);
+        Assert.Equal(0, diagnostic.WinSpoolStatus);
+        Assert.Equal("READY", diagnostic.WinSpoolDescription);
+        Assert.Null(diagnostic.WmiCode);
+        Assert.Null(diagnostic.WmiDescription);
+        Assert.Null(diagnostic.EpsonPopupText);
+        Assert.True(diagnostic.IsHealthy);
+    }
+
+    [Theory]
+    [InlineData(4, "No Paper")]
+    [InlineData(6, "No Toner")]
+    [InlineData(7, "Door Open")]
+    [InlineData(8, "Jammed")]
+    [InlineData(10, "Service Requested")]
+    public void GetDiagnostic_WmiPhysicalFault_ReturnsPhysicalFault(int code, string description)
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor
+        {
+            DetectedErrorState = code
+        }.GetDiagnostic("EPSON L5290 Series");
+
+        Assert.Equal(PrinterHealthState.Fault, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.PhysicalFault, diagnostic.IssueKind);
+        Assert.Equal(code, diagnostic.WmiCode);
+        Assert.Contains(description, diagnostic.WmiDescription);
+        Assert.False(diagnostic.IsHealthy);
+    }
+
+    [Fact]
+    public void GetDiagnostic_EpsonPopupError_ReturnsPhysicalFault()
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor
+        {
+            EpsonPopupText = "Paper jam. Open the cover."
+        }.GetDiagnostic("EPSON L5290 Series");
+
+        Assert.Equal(PrinterHealthState.Fault, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.PhysicalFault, diagnostic.IssueKind);
+        Assert.Equal("Paper jam. Open the cover.", diagnostic.EpsonPopupText);
+        Assert.False(diagnostic.IsHealthy);
+    }
+
+    [Fact]
+    public void GetDiagnostic_MissingQueue_ReturnsUnavailableWindowsQueueFault()
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor
+        {
+            WinSpoolAvailable = false,
+            WinSpoolDescription = "Failed to OpenPrinter",
+            WmiAvailable = false
+        }.GetDiagnostic("Missing Printer");
+
+        Assert.Equal(PrinterHealthState.Unavailable, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.WindowsQueueFault, diagnostic.IssueKind);
+        Assert.Equal("Failed to OpenPrinter", diagnostic.WinSpoolDescription);
+        Assert.Contains("not found", diagnostic.WmiDescription);
+        Assert.False(diagnostic.IsHealthy);
+    }
+
+    [Theory]
+    [InlineData(true, 3, 0)]
+    [InlineData(false, 7, 0)]
+    [InlineData(false, 3, WinSpoolApi.PRINTER_STATUS_OFFLINE)]
+    public void GetDiagnostic_OfflineQueue_ReturnsOfflineWindowsQueueFault(
+        bool wmiOffline,
+        int extendedPrinterStatus,
+        uint winSpoolStatus)
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor
+        {
+            WmiOffline = wmiOffline,
+            ExtendedPrinterStatus = extendedPrinterStatus,
+            WinSpoolStatus = winSpoolStatus,
+            WinSpoolDescription = winSpoolStatus == 0 ? "READY" : "OFFLINE"
+        }.GetDiagnostic("EPSON L5290 Series");
+
+        Assert.Equal(PrinterHealthState.Offline, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.WindowsQueueFault, diagnostic.IssueKind);
+        Assert.False(diagnostic.IsHealthy);
+    }
+
+    [Fact]
+    public void GetDiagnostic_WinSpoolFault_ReturnsWindowsQueueFault()
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor
+        {
+            WinSpoolStatus = WinSpoolApi.PRINTER_STATUS_ERROR,
+            WinSpoolDescription = "ERROR"
+        }.GetDiagnostic("EPSON L5290 Series");
+
+        Assert.Equal(PrinterHealthState.Fault, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.WindowsQueueFault, diagnostic.IssueKind);
+        Assert.False(diagnostic.IsHealthy);
+    }
+
+    [Theory]
+    [InlineData(6, "Stopped Printing")]
+    [InlineData(9, "Error")]
+    public void GetDiagnostic_WmiQueueFault_ReturnsWindowsQueueFault(int status, string description)
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor
+        {
+            ExtendedPrinterStatus = status
+        }.GetDiagnostic("EPSON L5290 Series");
+
+        Assert.Equal(PrinterHealthState.Fault, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.WindowsQueueFault, diagnostic.IssueKind);
+        Assert.Equal(status, diagnostic.WmiCode);
+        Assert.Contains(description, diagnostic.WmiDescription);
+        Assert.False(diagnostic.IsHealthy);
+    }
+
+    [Fact]
+    public void GetDiagnostic_UnavailableWmiQueue_ReturnsUnavailableWindowsQueueFault()
+    {
+        var diagnostic = new DiagnosticPrinterHealthMonitor
+        {
+            ExtendedPrinterStatus = 11
+        }.GetDiagnostic("EPSON L5290 Series");
+
+        Assert.Equal(PrinterHealthState.Unavailable, diagnostic.PrinterState);
+        Assert.Equal(PrinterHealthIssueKind.WindowsQueueFault, diagnostic.IssueKind);
+        Assert.Equal(11, diagnostic.WmiCode);
+        Assert.Contains("Not Available", diagnostic.WmiDescription);
+        Assert.False(diagnostic.IsHealthy);
+    }
+
+    [Fact]
+    public void HasFatalHardwareError_WinSpoolUnavailableWithHealthyWmi_RetainsFalseResult()
+    {
+        var monitor = new DiagnosticPrinterHealthMonitor
+        {
+            WinSpoolAvailable = false,
+            WinSpoolDescription = "Failed to OpenPrinter"
+        };
+
+        var hasFatalError = monitor.HasFatalHardwareError(
+            "EPSON L5290 Series",
+            out var errorCode,
+            out var errorMessage);
+
+        Assert.False(hasFatalError);
+        Assert.Equal(0, errorCode);
+        Assert.Empty(errorMessage);
     }
 }

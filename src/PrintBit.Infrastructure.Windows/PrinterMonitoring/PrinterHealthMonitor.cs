@@ -32,6 +32,17 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     private int _fatalErrorCode = 0;
     private string _fatalErrorMessage = string.Empty;
 
+    private readonly record struct PrinterHealthProbes(
+        bool WinSpoolAvailable,
+        uint WinSpoolStatus,
+        string WinSpoolDescription,
+        bool WmiAvailable,
+        bool IsOffline,
+        int DetectedErrorState,
+        int ExtendedPrinterStatus,
+        bool HasEpsonPopup,
+        string EpsonPopupContent);
+
     // Win32 APIs for Epson Status Monitor Popup checking
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern bool IsWindowVisible(IntPtr hWnd);
@@ -67,13 +78,10 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
     public virtual bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc)
     {
-        var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var status, out winSpoolDesc);
-        winSpoolStatus = (int)status;
-        var wsHealthy = winSpoolOk && ((status & WinSpoolApi.FATAL_STATUS_MASK) == 0);
-        var wmiHealthy = IsWmiHealthy(printerName, out _);
-        var (hasPopup, _, _, _) = CheckEpsonStatusMonitorPopup(printerName);
-
-        return wsHealthy && wmiHealthy && !hasPopup;
+        var diagnostic = GetDiagnostic(printerName);
+        winSpoolStatus = diagnostic.WinSpoolStatus;
+        winSpoolDesc = diagnostic.WinSpoolDescription;
+        return diagnostic.IsHealthy;
     }
 
     public bool HasFatalHardwareError(string printerName, out int errorCode, out string errorMessage)
@@ -91,32 +99,139 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             }
         }
 
-        var winSpoolOk = WinSpoolApi.GetPrinterStatus(printerName, out var winSpoolStatus, out var winSpoolDesc);
-        if (winSpoolOk && (winSpoolStatus & WinSpoolApi.FATAL_STATUS_MASK) != 0)
+        var probes = ReadHealthProbes(printerName);
+        if (probes.WinSpoolAvailable &&
+            (probes.WinSpoolStatus & WinSpoolApi.FATAL_STATUS_MASK) != 0)
         {
-            errorCode = (int)winSpoolStatus;
-            errorMessage = $"WinSpool reports: {winSpoolDesc}";
+            errorCode = (int)probes.WinSpoolStatus;
+            errorMessage = $"WinSpool reports: {probes.WinSpoolDescription}";
             return true;
         }
 
-        if (!IsWmiHealthy(printerName, out var wmiDesc))
+        if (TryGetWmiFailureDescription(printerName, probes, out var wmiDescription))
         {
             errorCode = 3;
-            errorMessage = wmiDesc;
+            errorMessage = wmiDescription;
             return true;
         }
 
-        var (hasPopup, pid, title, content) = CheckEpsonStatusMonitorPopup(printerName);
-        if (hasPopup)
+        if (probes.HasEpsonPopup)
         {
             errorCode = 99;
-            errorMessage = $"Epson Popup: {content}";
+            errorMessage = $"Epson Popup: {probes.EpsonPopupContent}";
             return true;
         }
 
         errorCode = 0;
         errorMessage = string.Empty;
         return false;
+    }
+
+    public PrinterHealthDiagnostic GetDiagnostic(string printerName)
+    {
+        var probes = ReadHealthProbes(printerName);
+        var printerState = PrinterHealthState.Healthy;
+        var issueKind = PrinterHealthIssueKind.None;
+        int? wmiCode = null;
+        string? wmiDescription = null;
+
+        if (IsPhysicalDetectedErrorState(probes.DetectedErrorState))
+        {
+            printerState = PrinterHealthState.Fault;
+            issueKind = PrinterHealthIssueKind.PhysicalFault;
+            wmiCode = probes.DetectedErrorState;
+            wmiDescription =
+                $"Error {probes.DetectedErrorState} ({DetectedErrorStateDescription(probes.DetectedErrorState)})";
+        }
+        else if (probes.HasEpsonPopup)
+        {
+            printerState = PrinterHealthState.Fault;
+            issueKind = PrinterHealthIssueKind.PhysicalFault;
+        }
+        else if (!probes.WmiAvailable)
+        {
+            printerState = PrinterHealthState.Unavailable;
+            issueKind = PrinterHealthIssueKind.WindowsQueueFault;
+            wmiDescription = $"Printer queue '{printerName}' not found";
+        }
+        else if (probes.IsOffline || probes.DetectedErrorState == 9 || probes.ExtendedPrinterStatus == 7 ||
+                 (probes.WinSpoolStatus & WinSpoolApi.PRINTER_STATUS_OFFLINE) != 0)
+        {
+            printerState = PrinterHealthState.Offline;
+            issueKind = PrinterHealthIssueKind.WindowsQueueFault;
+            (wmiCode, wmiDescription) = DescribeWmiQueueFault(
+                probes.IsOffline,
+                probes.DetectedErrorState,
+                probes.ExtendedPrinterStatus);
+        }
+        else if (probes.ExtendedPrinterStatus == 11)
+        {
+            printerState = PrinterHealthState.Unavailable;
+            issueKind = PrinterHealthIssueKind.WindowsQueueFault;
+            wmiCode = probes.ExtendedPrinterStatus;
+            wmiDescription =
+                $"Extended status {probes.ExtendedPrinterStatus} ({ExtendedPrinterStatusDescription(probes.ExtendedPrinterStatus)})";
+        }
+        else if (IsFatalExtendedPrinterStatus(probes.ExtendedPrinterStatus))
+        {
+            printerState = PrinterHealthState.Fault;
+            issueKind = PrinterHealthIssueKind.WindowsQueueFault;
+            wmiCode = probes.ExtendedPrinterStatus;
+            wmiDescription =
+                $"Extended status {probes.ExtendedPrinterStatus} ({ExtendedPrinterStatusDescription(probes.ExtendedPrinterStatus)})";
+        }
+        else if (!probes.WinSpoolAvailable)
+        {
+            printerState = PrinterHealthState.Unavailable;
+            issueKind = PrinterHealthIssueKind.WindowsQueueFault;
+        }
+        else if ((probes.WinSpoolStatus & WinSpoolApi.FATAL_STATUS_MASK) != 0)
+        {
+            printerState = PrinterHealthState.Fault;
+            issueKind = PrinterHealthIssueKind.WindowsQueueFault;
+        }
+
+        return new PrinterHealthDiagnostic
+        {
+            PrinterState = printerState,
+            IssueKind = issueKind,
+            WinSpoolStatus = (int)probes.WinSpoolStatus,
+            WinSpoolDescription = probes.WinSpoolDescription,
+            WmiCode = wmiCode,
+            WmiDescription = wmiDescription,
+            EpsonPopupText = probes.HasEpsonPopup ? probes.EpsonPopupContent : null
+        };
+    }
+
+    protected virtual bool TryGetWinSpoolStatus(
+        string printerName,
+        out uint status,
+        out string description) =>
+        WinSpoolApi.GetPrinterStatus(printerName, out status, out description);
+
+    private PrinterHealthProbes ReadHealthProbes(string printerName)
+    {
+        var winSpoolAvailable = TryGetWinSpoolStatus(
+            printerName,
+            out var winSpoolStatus,
+            out var winSpoolDescription);
+        var wmiAvailable = TryReadMonitorStatus(
+            printerName,
+            out var isOffline,
+            out var detectedErrorState,
+            out var extendedPrinterStatus);
+        var (hasPopup, _, _, popupContent) = CheckEpsonStatusMonitorPopup(printerName);
+
+        return new PrinterHealthProbes(
+            winSpoolAvailable,
+            winSpoolStatus,
+            winSpoolDescription,
+            wmiAvailable,
+            isOffline,
+            detectedErrorState,
+            extendedPrinterStatus,
+            hasPopup,
+            popupContent);
     }
 
     public async Task<bool> WaitForPrinterHealthyAsync(
@@ -393,61 +508,6 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         }
     }
 
-    private bool IsWmiHealthy(string printerName, out string wmiDesc)
-    {
-        wmiDesc = "OK";
-        bool foundPrinter = false;
-        try
-        {
-            var escapedPrinterName = printerName.Replace("'", "''");
-            using var searcher = new ManagementObjectSearcher(
-                $"SELECT DetectedErrorState, ExtendedPrinterStatus, WorkOffline FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
-            
-            using var results = searcher.Get();
-            foreach (ManagementObject printer in results.Cast<ManagementObject>())
-            {
-                foundPrinter = true;
-                try
-                {
-                    if (printer["WorkOffline"] is true)
-                    {
-                        wmiDesc = "Offline";
-                        return false;
-                    }
-                    var extStatus = Convert.ToInt32(printer["ExtendedPrinterStatus"] ?? 0);
-                    if (IsFatalExtendedPrinterStatus(extStatus))
-                    {
-                        wmiDesc = $"Extended status {extStatus} ({ExtendedPrinterStatusDescription(extStatus)})";
-                        return false;
-                    }
-                    var err = Convert.ToInt32(printer["DetectedErrorState"] ?? 0);
-                    if (IsFatalDetectedErrorState(err))
-                    {
-                        wmiDesc = $"Error {err} ({DetectedErrorStateDescription(err)})";
-                        return false;
-                    }
-                }
-                finally
-                {
-                    printer.Dispose();
-                }
-            }
-
-            if (!foundPrinter)
-            {
-                wmiDesc = $"Printer queue '{printerName}' not found";
-                return false;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "WMI query failed for {printerName}", printerName);
-            wmiDesc = $"WMI query failed: {ex.Message}";
-            return false;
-        }
-        return true;
-    }
-
     private static bool IsFatalDetectedErrorState(int code) => code switch
     {
         4 => true,  // No Paper
@@ -459,6 +519,72 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         11 => true, // Output Bin Full
         _ => false
     };
+
+    private static bool IsPhysicalDetectedErrorState(int code) => code switch
+    {
+        4 => true,  // No Paper
+        6 => true,  // No Toner
+        7 => true,  // Door Open
+        8 => true,  // Jammed
+        10 => true, // Service Requested
+        11 => true, // Output Bin Full
+        _ => false
+    };
+
+    private static (int? Code, string Description) DescribeWmiQueueFault(
+        bool isOffline,
+        int detectedErrorState,
+        int extendedPrinterStatus)
+    {
+        if (detectedErrorState == 9)
+        {
+            return (detectedErrorState,
+                $"Error {detectedErrorState} ({DetectedErrorStateDescription(detectedErrorState)})");
+        }
+
+        if (extendedPrinterStatus == 7)
+        {
+            return (extendedPrinterStatus,
+                $"Extended status {extendedPrinterStatus} ({ExtendedPrinterStatusDescription(extendedPrinterStatus)})");
+        }
+
+        return (null, isOffline ? "Offline" : "Queue fault");
+    }
+
+    private static bool TryGetWmiFailureDescription(
+        string printerName,
+        PrinterHealthProbes probes,
+        out string description)
+    {
+        if (!probes.WmiAvailable)
+        {
+            description = $"Printer queue '{printerName}' not found";
+            return true;
+        }
+
+        if (probes.IsOffline)
+        {
+            description = "Offline";
+            return true;
+        }
+
+        if (IsFatalExtendedPrinterStatus(probes.ExtendedPrinterStatus))
+        {
+            description =
+                $"Extended status {probes.ExtendedPrinterStatus} ({ExtendedPrinterStatusDescription(probes.ExtendedPrinterStatus)})";
+            return true;
+        }
+
+        if (IsFatalDetectedErrorState(probes.DetectedErrorState))
+        {
+            description =
+                $"Error {probes.DetectedErrorState} ({DetectedErrorStateDescription(probes.DetectedErrorState)})";
+            return true;
+        }
+
+        description = string.Empty;
+        return false;
+    }
 
     private static bool IsFatalExtendedPrinterStatus(int status) => status switch
     {
@@ -506,7 +632,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         _ => $"Unknown Error ({code})"
     };
 
-    private (bool HasPopup, int ProcessId, string WindowTitle, string Content) CheckEpsonStatusMonitorPopup(string printerName)
+    protected virtual (bool HasPopup, int ProcessId, string WindowTitle, string Content) CheckEpsonStatusMonitorPopup(string printerName)
     {
         bool found = false;
         int targetPid = 0;

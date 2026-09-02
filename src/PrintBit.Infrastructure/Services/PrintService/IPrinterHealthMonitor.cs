@@ -6,6 +6,7 @@ namespace PrintBit.Infrastructure.Services.PrintService;
 
 public interface IPrinterHealthMonitor
 {
+    PrinterHealthDiagnostic GetDiagnostic(string printerName);
     bool IsHealthy(string printerName, out int winSpoolStatus, out string winSpoolDesc);
     bool HasFatalHardwareError(string printerName, out int errorCode, out string errorMessage);
     Task<bool> WaitForPrinterHealthyAsync(
