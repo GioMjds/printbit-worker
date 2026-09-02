@@ -229,5 +229,56 @@ public class WorkerPrintEventTests
         Assert.True(evt.PowerStatus.IsBatteryLow);
         Assert.False(evt.PowerStatus.IsBatteryCritical);
     }
+
+    [Fact]
+    public void WorkerPrintEvent_SerializesPrinterStatusSnapshotPayload()
+    {
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
+
+        var evt = new WorkerPrintEvent
+        {
+            Type = WorkerPrintEventType.PrinterStatusSnapshot,
+            PrinterName = "EPSON L5290 Series",
+            Message = "Printer is online",
+            TimestampUtc = new DateTime(2026, 9, 2, 13, 0, 0, DateTimeKind.Utc)
+        };
+
+        var json = JsonSerializer.Serialize(evt, jsonOptions);
+        using var doc = JsonDocument.Parse(json);
+
+        Assert.Equal("PrinterStatusSnapshot", doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("EPSON L5290 Series", doc.RootElement.GetProperty("printerName").GetString());
+        Assert.Equal("Printer is online", doc.RootElement.GetProperty("message").GetString());
+        Assert.Equal("2026-09-02T13:00:00Z", doc.RootElement.GetProperty("timestampUtc").GetString());
+    }
+
+    [Fact]
+    public void WorkerPrintEvent_DeserializesPrinterStatusSnapshotPayload()
+    {
+        var json = """
+        {
+            "type": "PrinterStatusSnapshot",
+            "printerName": "EPSON L5290 Series",
+            "message": "Printer is online",
+            "timestampUtc": "2026-09-02T13:00:00Z"
+        }
+        """;
+
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
+
+        var evt = JsonSerializer.Deserialize<WorkerPrintEvent>(json, jsonOptions);
+
+        Assert.NotNull(evt);
+        Assert.Equal(WorkerPrintEventType.PrinterStatusSnapshot, evt.Type);
+        Assert.Equal("EPSON L5290 Series", evt.PrinterName);
+        Assert.Equal("Printer is online", evt.Message);
+        Assert.Equal(new DateTime(2026, 9, 2, 13, 0, 0, DateTimeKind.Utc), evt.TimestampUtc);
+    }
 }
 

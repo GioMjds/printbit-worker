@@ -9,6 +9,7 @@ public enum WorkerPrintEventType
     PrinterOnline = 4,
     PrinterError = 5,
     PowerStatusChanged = 6,
-    PowerStatusSnapshot = 7
+    PowerStatusSnapshot = 7,
+    PrinterStatusSnapshot = 8
 }
 

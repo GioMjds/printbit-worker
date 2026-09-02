@@ -371,4 +371,80 @@ public class PrinterHealthMonitorTests
         Assert.Equal(0, errorCode);
         Assert.Empty(errorMessage);
     }
+
+    [Fact]
+    public async Task BroadcastInitialSnapshotAsync_WhenOnline_BroadcastsOnlineSnapshot()
+    {
+        var capturedEvents = new List<WorkerPrintEvent>();
+        var eventPipe = new Mock<IWorkerEventPipeClient>();
+        eventPipe
+            .Setup(pipe => pipe.PublishAsync(It.IsAny<WorkerPrintEvent>(), It.IsAny<CancellationToken>()))
+            .Callback<WorkerPrintEvent, CancellationToken>((evt, _) => capturedEvents.Add(evt))
+            .ReturnsAsync(true);
+
+        var monitor = new WmiStatusMonitor(
+            Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
+            eventPipe.Object,
+            isOffline: false);
+
+        var result = await monitor.BroadcastInitialSnapshotAsync(CancellationToken.None);
+
+        Assert.True(result);
+        var snapshot = Assert.Single(capturedEvents);
+        Assert.Equal(WorkerPrintEventType.PrinterStatusSnapshot, snapshot.Type);
+        Assert.Equal("EPSON L5290 Series", snapshot.PrinterName);
+        Assert.Equal("Printer is online", snapshot.Message);
+    }
+
+    [Fact]
+    public async Task BroadcastInitialSnapshotAsync_WhenOffline_BroadcastsOfflineSnapshot()
+    {
+        var capturedEvents = new List<WorkerPrintEvent>();
+        var eventPipe = new Mock<IWorkerEventPipeClient>();
+        eventPipe
+            .Setup(pipe => pipe.PublishAsync(It.IsAny<WorkerPrintEvent>(), It.IsAny<CancellationToken>()))
+            .Callback<WorkerPrintEvent, CancellationToken>((evt, _) => capturedEvents.Add(evt))
+            .ReturnsAsync(true);
+
+        var monitor = new WmiStatusMonitor(
+            Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
+            eventPipe.Object,
+            isOffline: true);
+
+        var result = await monitor.BroadcastInitialSnapshotAsync(CancellationToken.None);
+
+        Assert.True(result);
+        var snapshot = Assert.Single(capturedEvents);
+        Assert.Equal(WorkerPrintEventType.PrinterStatusSnapshot, snapshot.Type);
+        Assert.Equal("EPSON L5290 Series", snapshot.PrinterName);
+        Assert.Equal("Printer is offline", snapshot.Message);
+    }
+
+    [Fact]
+    public async Task StartAsync_BroadcastsInitialSnapshotOnStartup()
+    {
+        var tcs = new TaskCompletionSource<WorkerPrintEvent>();
+        var eventPipe = new Mock<IWorkerEventPipeClient>();
+        eventPipe
+            .Setup(pipe => pipe.PublishAsync(It.IsAny<WorkerPrintEvent>(), It.IsAny<CancellationToken>()))
+            .Callback<WorkerPrintEvent, CancellationToken>((evt, _) => tcs.TrySetResult(evt))
+            .ReturnsAsync(true);
+        eventPipe
+            .Setup(pipe => pipe.SendAsync(It.IsAny<WorkerPrintEvent>(), It.IsAny<CancellationToken>()))
+            .Callback<WorkerPrintEvent, CancellationToken>((evt, _) => tcs.TrySetResult(evt))
+            .ReturnsAsync(true);
+
+        var monitor = new WmiStatusMonitor(
+            Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
+            eventPipe.Object,
+            isOffline: false);
+
+        await monitor.StartAsync(CancellationToken.None);
+        var snapshot = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await monitor.StopAsync(CancellationToken.None);
+
+        Assert.Equal(WorkerPrintEventType.PrinterStatusSnapshot, snapshot.Type);
+        Assert.Equal("EPSON L5290 Series", snapshot.PrinterName);
+        Assert.Equal("Printer is online", snapshot.Message);
+    }
 }

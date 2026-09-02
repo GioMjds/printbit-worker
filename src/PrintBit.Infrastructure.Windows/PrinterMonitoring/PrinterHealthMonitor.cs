@@ -339,9 +339,38 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         }
     }
 
+    public virtual async Task<bool> BroadcastInitialSnapshotAsync(CancellationToken stoppingToken = default)
+    {
+        var foundPrinter = TryReadMonitorStatus(
+            _hardwareSettings.PrinterName,
+            out var isOffline,
+            out _,
+            out _);
+        var isOnline = foundPrinter && !isOffline;
+
+        var initialSnapshot = new WorkerPrintEvent
+        {
+            Type = WorkerPrintEventType.PrinterStatusSnapshot,
+            PrinterName = _hardwareSettings.PrinterName,
+            Message = isOnline ? "Printer is online" : "Printer is offline",
+            TimestampUtc = DateTime.UtcNow
+        };
+
+        return await _eventPipe.PublishAsync(initialSnapshot, stoppingToken);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Unified Printer Monitor loop started for {printer}", _hardwareSettings.PrinterName);
+
+        try
+        {
+            await BroadcastInitialSnapshotAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to broadcast initial printer status snapshot");
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {

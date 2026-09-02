@@ -27,6 +27,10 @@ public sealed class WorkerEventPipeClient : IWorkerEventPipeClient
         _settings = options.Value;
     }
 
+    public Task<bool> PublishAsync(
+        WorkerPrintEvent evt,
+        CancellationToken cancellationToken = default) => SendAsync(evt, cancellationToken);
+
     /// <summary>
     /// Sends a newline-delimited JSON event to the worker return pipe.
     /// Returns true when the payload was written and flushed; false when
