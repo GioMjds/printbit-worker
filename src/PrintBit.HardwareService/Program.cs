@@ -1,5 +1,6 @@
 using PrintBit.HardwareService.Services;
 using PrintBit.Infrastructure.IPC;
+using PrintBit.Infrastructure.Services.DocumentConversion;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 using PrintBit.Infrastructure.Windows.PowerMonitoring;
@@ -15,12 +16,18 @@ builder.Services.Configure<PowerSettings>(builder.Configuration.GetSection("Powe
 
 builder.Services.Configure<PrinterRecoverySettings>(builder.Configuration.GetSection("PrinterRecoverySettings"));
 
+builder.Services.Configure<DocumentConversionSettings>(builder.Configuration.GetSection("DocumentConversionSettings"));
+
 builder.Services.AddWindowsService(options =>
 {
     options.ServiceName = "PrintBitHardware";
 });
 
 builder.Services.AddHostedService<ErrorPipeHostedService>();
+
+// Document conversion offline service and IPC pipe
+builder.Services.AddSingleton<IDocumentConversionService, LibreOfficeDocumentConversionService>();
+builder.Services.AddHostedService<DocumentConversionPipeHostedService>();
 
 // Printer monitoring and whole-document spooler dispatch
 builder.Services.AddSingleton<PrinterHealthMonitor>();
