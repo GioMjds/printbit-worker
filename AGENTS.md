@@ -201,6 +201,33 @@ Each connection receives one JSON line, dispatches one command, writes one singl
 | `startedAt` | Yes | UTC timestamp when request handling started |
 | `completedAt` | Yes | UTC timestamp when request handling finished |
 
+#### Command Outcome Mapping
+
+| Outcome | Trigger Condition | Spooler Restarted? | Action Value | Meaning |
+|---|---|---|---|---|
+| `healthy` | Spooler running and printer diagnostic is healthy | No | `null` | Kiosk printer ready for printing. |
+| `recovered` | Windows-side fault detected, Spooler restart succeeded, and printer diagnostic rechecked healthy within deadline | Yes | `"RestartSpooler"` | Printer restored to healthy operation. |
+| `manual_intervention_required` | Physical printer error detected before or after restart (paper out, jam, door open, ink empty, service required, or Epson popup dialog) | No | `null` | Physical fault requires staff intervention. |
+| `worker_busy` | Recovery lease cannot be acquired because an active print job or another recovery operation holds the lease | No | `null` | Active print protected; Node retries after print completes. |
+| `restart_failed` | Spooler service failed to stop/start within timeout (30s), transition errored, or final recheck timed out without health | Yes | `"RestartSpooler"` | Spooler restart failed to clear fault. |
+| `invalid_request` | Malformed JSON, payload > 8192 bytes, unknown command type, or missing required fields (`requestId`) | No | `null` | Client request rejected before processing. |
+
+#### No-Job-Operation Policy
+
+- Recovery does **not** cancel, delete, or modify spooler print jobs.
+- Recovery does **not** purge spool files (`*.spl` / `*.shd`) from Windows system directories.
+- Recovery does **not** reset PnP USB devices.
+- Recovery does **not** launch Epson utilities or kill printer/spooler processes (`taskkill`).
+- Automatic destructive recovery on print timeouts has been completely removed from `JobOrchestrator` and `PrinterHealthMonitor`.
+
+#### Node Handoff Contract
+
+The administrative Node.js service must satisfy the following operational contract:
+- **Administrative Connection**: The Node client process must run with elevated administrative tokens (`BUILTIN\Administrators`) to satisfy the command pipe DACL.
+- **Response Timeout Deadline (>= 45s)**: The maximum duration of a worker recovery cycle is bounded by `SpoolerTransitionTimeoutSeconds` (30s) + `HealthRecheckTimeoutSeconds` (10s) + overhead (~5s). The Node client must configure an I/O response deadline of at least **45 seconds** before timing out the connection.
+- **Audit & History Persistence**: Because the C# worker is stateless, the Node service is solely responsible for recording recovery attempts, timestamps, request IDs, and outcomes into durable disk-backed logs or a database for technician auditing.
+- **Transaction Gating**: Node must keep customer transactions blocked (preventing coin acceptance / UI print flow) while printer status is unhealthy or while recovery is in flight, until a `healthy` or `recovered` outcome is received.
+
 ### Cross-Windows-Identity DACL
 
 The kiosk runs the C# worker as `desktop-jhtg0bm\printbit` and the Node
@@ -259,7 +286,7 @@ Dependency direction:
 | `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
 | `IPrinterRecoveryService` / `PrinterRecoveryService` | Infrastructure / Infrastructure.Windows | Printer recovery service orchestrating typed diagnostics, physical fault avoidance, and bounded native Spooler restart |
 | `IPrintSpoolerController` / `ServiceControllerSpoolerController` | Infrastructure.Windows | Native Windows ServiceController implementation managing Spooler service status and clean restarts |
-| `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; concrete service and DI registration follow in the recovery-control-plane rollout |
+| `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; registered as singleton `PrintOperationCoordinator` in `Program.cs` |
 | `WorkerCommandPipeHostedService` | HardwareService | Background service listening on `WorkerCommandPipeName` for recovery commands, dispatching to `IPrinterRecoveryService` and writing single-line JSON responses |
 | `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for creating secure Windows ACLs granting admin/system-only access to the command pipe |
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
@@ -267,8 +294,8 @@ Dependency direction:
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
-printer-only mode. The DI container hosts only the three printer-related services
-(`PrintQueueWatcher`, `ErrorPipeHostedService`, `PrinterHealthMonitor`).
+printer-only mode. The DI container hosts background services (`PrintQueueWatcher`,
+`ErrorPipeHostedService`, `PrinterHealthMonitor`, `PowerMonitorService`, and `WorkerCommandPipeHostedService`).
 
 ### DI Registration (Program.cs)
 
@@ -279,12 +306,34 @@ builder.Services.Configure<HardwareSettings>(
     builder.Configuration.GetSection("HardwareSettings"));
 builder.Services.Configure<IpcSettings>(
     builder.Configuration.GetSection("IpcSettings"));
+builder.Services.Configure<PowerSettings>(
+    builder.Configuration.GetSection("PowerSettings"));
+builder.Services.Configure<PrinterRecoverySettings>(
+    builder.Configuration.GetSection("PrinterRecoverySettings"));
+
+builder.Services.AddWindowsService(options =>
+{
+    options.ServiceName = "PrintBitHardware";
+});
 
 builder.Services.AddHostedService<ErrorPipeHostedService>();
 
+// Printer monitoring and whole-document spooler dispatch
 builder.Services.AddSingleton<PrinterHealthMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PrinterHealthMonitor>());
 builder.Services.AddSingleton<IPrinterHealthMonitor>(sp => sp.GetRequiredService<PrinterHealthMonitor>());
+
+// Printer recovery control plane
+builder.Services.AddSingleton<IPrinterOperationCoordinator, PrintOperationCoordinator>();
+builder.Services.AddSingleton<IPrintSpoolerController, ServiceControllerSpoolerController>();
+builder.Services.AddSingleton<IPrinterRecoveryService, PrinterRecoveryService>();
+builder.Services.AddHostedService<WorkerCommandPipeHostedService>();
+
+// Power monitoring and dispatch safety gate
+builder.Services.AddSingleton<IPowerStatusProvider, NativePowerStatusProvider>();
+builder.Services.AddSingleton<IPowerSafetyGate, PowerSafetyGate>();
+builder.Services.AddSingleton<PowerMonitorService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PowerMonitorService>());
 
 builder.Services.AddSingleton<IDocumentPrinter, DocumentPrinter>();
 builder.Services.AddSingleton<IJobOrchestrator, JobOrchestrator>();

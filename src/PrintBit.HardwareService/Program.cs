@@ -13,6 +13,8 @@ builder.Services.Configure<IpcSettings>(builder.Configuration.GetSection("IpcSet
 
 builder.Services.Configure<PowerSettings>(builder.Configuration.GetSection("PowerSettings"));
 
+builder.Services.Configure<PrinterRecoverySettings>(builder.Configuration.GetSection("PrinterRecoverySettings"));
+
 builder.Services.AddWindowsService(options =>
 {
     options.ServiceName = "PrintBitHardware";
@@ -24,6 +26,12 @@ builder.Services.AddHostedService<ErrorPipeHostedService>();
 builder.Services.AddSingleton<PrinterHealthMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PrinterHealthMonitor>());
 builder.Services.AddSingleton<IPrinterHealthMonitor>(sp => sp.GetRequiredService<PrinterHealthMonitor>());
+
+// Printer recovery control plane
+builder.Services.AddSingleton<IPrinterOperationCoordinator, PrintOperationCoordinator>();
+builder.Services.AddSingleton<IPrintSpoolerController, ServiceControllerSpoolerController>();
+builder.Services.AddSingleton<IPrinterRecoveryService, PrinterRecoveryService>();
+builder.Services.AddHostedService<WorkerCommandPipeHostedService>();
 
 // Power monitoring and dispatch safety gate
 builder.Services.AddSingleton<IPowerStatusProvider, NativePowerStatusProvider>();
