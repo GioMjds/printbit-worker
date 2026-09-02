@@ -255,7 +255,7 @@ Dependency direction:
 |---|---|---|
 | `PrintQueueWatcher` | HardwareService | Watches queue directory, delegates to `IJobOrchestrator`, and cleans up sidecar files |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
-| `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, read-only typed health diagnostics (`GetDiagnostic`), and recovery routines |
+| `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, and read-only typed health diagnostics (`GetDiagnostic`) |
 | `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
 | `IPrinterRecoveryService` / `PrinterRecoveryService` | Infrastructure / Infrastructure.Windows | Printer recovery service orchestrating typed diagnostics, physical fault avoidance, and bounded native Spooler restart |
 | `IPrintSpoolerController` / `ServiceControllerSpoolerController` | Infrastructure.Windows | Native Windows ServiceController implementation managing Spooler service status and clean restarts |
@@ -263,7 +263,7 @@ Dependency direction:
 | `WorkerCommandPipeHostedService` | HardwareService | Background service listening on `WorkerCommandPipeName` for recovery commands, dispatching to `IPrinterRecoveryService` and writing single-line JSON responses |
 | `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for creating secure Windows ACLs granting admin/system-only access to the command pipe |
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
-| `JobOrchestrator` | Infrastructure | Counts and selects pages, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
+| `JobOrchestrator` | Infrastructure | Counts and selects pages, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
