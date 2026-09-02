@@ -176,6 +176,31 @@ carries `failureStage = "hardware_error"` and a human-readable `message`
 describing the detected error code. `PrinterOffline` / `PrinterOnline` are
 emitted on the WMI `WorkOffline` state change.
 
+### Named Pipe (Node -> Service Command Pipe)
+
+`WorkerCommandPipeHostedService` listens on `IpcSettings.WorkerCommandPipeName` (`printbit-worker-commands`) and handles **line-delimited JSON** recovery commands from the administrative Node.js service.
+
+Each connection receives one JSON line, dispatches one command, writes one single-line JSON `PrinterRecoveryResult`, flushes, and closes.
+
+| Command Request Field | Required | Notes |
+|---|---|---|
+| `requestId` | Yes | Non-empty correlation identifier preserved in response |
+| `type` | Yes | `GetPrinterRecoveryStatus` or `AttemptPrinterRecovery` |
+| `timestampUtc` | No | ISO-8601 timestamp |
+
+| Result Response Field | Required | Notes |
+|---|---|---|
+| `requestId` | Yes | Matches request `requestId` |
+| `type` | Yes | `GetPrinterRecoveryStatus` or `AttemptPrinterRecovery` |
+| `outcome` | Yes | `healthy`, `recovered`, `manual_intervention_required`, `worker_busy`, `restart_failed`, or `invalid_request` |
+| `action` | No | Executed repair action (e.g., `RestartSpooler` or null) |
+| `spoolerState` | No | Spooler service status snapshot |
+| `printerState` | No | Typed printer state (`Healthy`, `Offline`, `Fault`, etc.) |
+| `issueKind` | No | Typed issue classification (`None`, `PhysicalFault`, `WindowsQueueFault`) |
+| `message` | No | User-safe explanation or error message |
+| `startedAt` | Yes | UTC timestamp when request handling started |
+| `completedAt` | Yes | UTC timestamp when request handling finished |
+
 ### Cross-Windows-Identity DACL
 
 The kiosk runs the C# worker as `desktop-jhtg0bm\printbit` and the Node
@@ -197,6 +222,12 @@ when connecting to a pipe created by `admin`.
   exposes a public `PipeSecurity` constructor, so a more restrictive
   C# deployment would need P/Invoke to `SetSecurityInfo` on
   `SafePipeHandle`.
+- **C# worker command pipe** (`printbit-worker-commands`): Created using
+  `NamedPipeServerStreamAcl.Create` with strict Windows `PipeSecurity` configured
+  via `WorkerCommandPipeSecurity`. Grants `FullControl` to current service identity
+  and `LocalSystemSid`, and `ReadWrite` to `BuiltinAdministratorsSid`. Explicitly
+  excludes `WorldSid` (Everyone) and `AuthenticatedUserSid` so unprivileged kiosk
+  identities cannot trigger recovery or query internal diagnostics.
 
 If the kiosk is re-deployed with the two processes under the same
 identity, both fixes become inert (the default DACL is sufficient).
@@ -229,6 +260,9 @@ Dependency direction:
 | `IPrinterRecoveryService` / `PrinterRecoveryService` | Infrastructure / Infrastructure.Windows | Printer recovery service orchestrating typed diagnostics, physical fault avoidance, and bounded native Spooler restart |
 | `IPrintSpoolerController` / `ServiceControllerSpoolerController` | Infrastructure.Windows | Native Windows ServiceController implementation managing Spooler service status and clean restarts |
 | `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; concrete service and DI registration follow in the recovery-control-plane rollout |
+| `WorkerCommandPipeHostedService` | HardwareService | Background service listening on `WorkerCommandPipeName` for recovery commands, dispatching to `IPrinterRecoveryService` and writing single-line JSON responses |
+| `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for creating secure Windows ACLs granting admin/system-only access to the command pipe |
+| `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
 | `JobOrchestrator` | Infrastructure | Counts and selects pages, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
 
@@ -282,7 +316,8 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
     "MaxMessageBytes": 8192,
-    "WorkerReturnPipeName": "printbit-worker-events"
+    "WorkerReturnPipeName": "printbit-worker-events",
+    "WorkerCommandPipeName": "printbit-worker-commands"
   },
   "PrinterRecoverySettings": {
     "ServiceName": "Spooler",

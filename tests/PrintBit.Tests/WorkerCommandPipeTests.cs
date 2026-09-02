@@ -190,6 +190,59 @@ public class WorkerCommandPipeTests
         Assert.Equal(string.Empty, requestId);
     }
 
+    [Theory]
+    [InlineData("{\"requestId\":\"req-no-type\"}", "req-no-type")]
+    [InlineData("{\"requestId\":\"req-wrong-prop\",\"command\":\"AttemptPrinterRecovery\"}", "req-wrong-prop")]
+    [InlineData("{\"requestId\":\"req-empty-type\",\"type\":\"\"}", "req-empty-type")]
+    [InlineData("{\"requestId\":\"req-whitespace-type\",\"type\":\"   \"}", "req-whitespace-type")]
+    public void Parser_MissingOrEmptyTypeProperty_ReturnsFalseAndPreservesRequestId(
+        string json,
+        string expectedRequestId)
+    {
+        var parsed = WorkerCommandParser.TryParse(
+            json,
+            maxBytes: 8192,
+            out var command,
+            out var errorDetail,
+            out var requestId);
+
+        Assert.False(parsed);
+        Assert.Null(command);
+        Assert.NotNull(errorDetail);
+        Assert.Equal(expectedRequestId, requestId);
+        Assert.Contains("type", errorDetail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReadLineWithLimitAsync_EmptyLineWithNewline_ReturnsEmptyStringNotEof()
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("\n"));
+        var (line, oversized) = await WorkerCommandParser.ReadLineWithLimitAsync(stream, 8192);
+
+        Assert.False(oversized);
+        Assert.NotNull(line);
+        Assert.Equal(string.Empty, line);
+    }
+
+    [Fact]
+    public async Task ProcessRequestAsync_EmptyLineWithNewline_ReturnsInvalidRequest()
+    {
+        var service = CreateHostedService();
+
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes("\n"));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(string.Empty, result.RequestId);
+        Assert.Equal(PrinterRecoveryOutcome.InvalidRequest, result.Outcome);
+        Assert.Contains("empty", result.Message, StringComparison.OrdinalIgnoreCase);
+
+        _recoveryServiceMock.Verify(r => r.GetStatusAsync(It.IsAny<CancellationToken>()), Times.Never);
+        _recoveryServiceMock.Verify(r => r.AttemptRepairAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     #endregion
 
     #region 3. Pipe Security Test (Windows)

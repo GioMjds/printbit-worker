@@ -34,6 +34,7 @@ public static class WorkerCommandParser
         var buffer = new byte[1024];
         var totalBytes = 0;
         var oversized = false;
+        var foundNewline = false;
 
         while (true)
         {
@@ -55,6 +56,7 @@ public static class WorkerCommandParser
 
             if (newlineIndex >= 0)
             {
+                foundNewline = true;
                 totalBytes += newlineIndex;
                 if (totalBytes > limit)
                 {
@@ -83,7 +85,7 @@ public static class WorkerCommandParser
             return (null, true);
         }
 
-        if (ms.Length == 0 && totalBytes == 0)
+        if (ms.Length == 0 && totalBytes == 0 && !foundNewline)
         {
             return (null, false);
         }
@@ -144,6 +146,15 @@ public static class WorkerCommandParser
                 reqElem.ValueKind == JsonValueKind.String)
             {
                 requestId = reqElem.GetString() ?? string.Empty;
+            }
+
+            if (!TryGetPropertyCaseInsensitive(doc.RootElement, "type", out var typeElem) ||
+                typeElem.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(typeElem.GetString()))
+            {
+                errorDetail = "Command type is required";
+                command = null;
+                return false;
             }
 
             try
