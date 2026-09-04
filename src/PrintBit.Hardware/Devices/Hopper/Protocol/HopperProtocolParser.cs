@@ -143,7 +143,7 @@ public static class HopperProtocolParser
             var requestId = tokens[2];
             var code = tokens.Length > 3 ? tokens[3].ToUpperInvariant() : "UNKNOWN";
             var detail = tokens.Length > 4
-                ? string.Join(" ", tokens[4..])
+                ? string.Join(" ", tokens, 4, tokens.Length - 4)
                 : code;
 
             response = new HopperErrorResponse(requestId, code, detail);
