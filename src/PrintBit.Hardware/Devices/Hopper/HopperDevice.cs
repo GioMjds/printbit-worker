@@ -73,6 +73,10 @@ public sealed class HopperDevice : IHopper, IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(coinCount);
+        if (timeoutMs.HasValue)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(timeoutMs.Value);
+        }
 
         TaskCompletionSource<HopperDispenseResult> tcs;
         lock (_lock)
