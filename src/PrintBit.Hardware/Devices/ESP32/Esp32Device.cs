@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using PrintBit.Infrastructure.Services.SerialService;
 
 namespace PrintBit.Hardware.Devices.ESP32;
@@ -20,7 +20,7 @@ public class Esp32Device : IEsp32Device
         _logger = logger;
         _serialConnection = serialConnection;
 
-        _serialConnection.DataReceived += OnDataReceived;
+        _serialConnection.LineReceived += OnDataReceived;
     }
 
     public void Connect(
@@ -44,7 +44,7 @@ public class Esp32Device : IEsp32Device
 
     public void SendCommand(string command)
     {
-        _serialConnection.Send(command);
+        _serialConnection.SendLine(command);
 
         _logger.LogInformation(
             "ESP32 command sent: {command}",

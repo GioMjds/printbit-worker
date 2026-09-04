@@ -1,15 +1,24 @@
-﻿namespace PrintBit.Infrastructure.Services.SerialService
+namespace PrintBit.Infrastructure.Services.SerialService;
+
+public interface ISerialConnection
 {
-    public interface ISerialConnection
-    {
-        bool IsConnected { get; }
-        
-        void Connect(string portName, int baudRate);
+    bool IsConnected { get; }
 
-        void Disconnect();
+    string? CurrentPortName { get; }
 
-        void Send(string data);
+    event EventHandler<string>? LineReceived;
 
-        event EventHandler<string>? DataReceived; 
-    }
+    event EventHandler<(bool isConnected, string? port, string? error)>? ConnectionChanged;
+
+    void Connect(string portName, int baudRate);
+
+    void Disconnect();
+
+    void SendLine(string data);
+
+    [Obsolete("Use LineReceived instead.")]
+    event EventHandler<string>? DataReceived;
+
+    [Obsolete("Use SendLine instead.")]
+    void Send(string data);
 }
