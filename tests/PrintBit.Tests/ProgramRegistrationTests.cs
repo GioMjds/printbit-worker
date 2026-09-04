@@ -9,8 +9,14 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Moq;
+using PrintBit.Application.Services;
+using PrintBit.Hardware.Devices.CoinAcceptor;
+using PrintBit.Hardware.Devices.ESP32;
+using PrintBit.Hardware.Devices.Hopper;
 using PrintBit.HardwareService.Services;
 using PrintBit.Infrastructure.Services.PrintService;
+using PrintBit.Infrastructure.Services.SerialService;
+using PrintBit.Infrastructure.Windows.PowerMonitoring;
 using PrintBit.Infrastructure.Windows.PrinterMonitoring;
 using PrintBit.Shared.Configurations;
 using Xunit;
@@ -239,4 +245,54 @@ public class ProgramRegistrationTests
         var injectedRecovery = recoveryField.GetValue(hostedService);
         Assert.Same(recoverySingleton, injectedRecovery);
     }
+
+    [Fact]
+    public void ServiceCollection_ResolvesHardwareOrchestratorSingleton()
+    {
+        var services = new ServiceCollection();
+
+        services.AddLogging();
+        services.Configure<HardwareSettings>(_ => { });
+        services.Configure<IpcSettings>(_ => { });
+        services.Configure<PowerSettings>(_ => { });
+
+        services.AddSingleton<IPowerStatusProvider, NativePowerStatusProvider>();
+        services.AddSingleton<IPowerSafetyGate, PowerSafetyGate>();
+        services.AddSingleton<ISerialPortAdapter>(new Mock<ISerialPortAdapter>().Object);
+        services.AddSingleton<ISerialConnection, SerialConnection>();
+        services.AddSingleton<IEsp32Device, Esp32Device>();
+        services.AddSingleton<CoinPulseDecoder>();
+        services.AddSingleton<ICoinAcceptor, CoinAcceptorDevice>();
+        services.AddSingleton<IHopper, HopperDevice>();
+        services.AddSingleton<HardwareOrchestrator>();
+        services.AddSingleton<IHardwareOrchestrator>(sp => sp.GetRequiredService<HardwareOrchestrator>());
+
+        using var provider = services.BuildServiceProvider();
+
+        var orchestrator1 = provider.GetRequiredService<IHardwareOrchestrator>();
+        var orchestrator2 = provider.GetRequiredService<HardwareOrchestrator>();
+
+        Assert.NotNull(orchestrator1);
+        Assert.Same(orchestrator1, orchestrator2);
+    }
+
+    [Fact]
+    public void ProgramCs_RegistersAllHardwareOrchestratorServices()
+    {
+        var programCsPath = Path.Combine(GetSolutionRoot(), "src", "PrintBit.HardwareService", "Program.cs");
+        Assert.True(File.Exists(programCsPath), $"Expected Program.cs to exist at {programCsPath}");
+
+        var content = File.ReadAllText(programCsPath);
+
+        Assert.Contains("builder.Services.AddSingleton<ISerialConnection, SerialConnection>();", content);
+        Assert.Contains("builder.Services.AddHostedService<SerialHostedService>();", content);
+        Assert.Contains("builder.Services.AddSingleton<IEsp32Device, Esp32Device>();", content);
+        Assert.Contains("builder.Services.AddSingleton<CoinPulseDecoder>();", content);
+        Assert.Contains("builder.Services.AddSingleton<ICoinAcceptor, CoinAcceptorDevice>();", content);
+        Assert.Contains("builder.Services.AddSingleton<IHopper, HopperDevice>();", content);
+        Assert.Contains("builder.Services.AddSingleton<HardwareOrchestrator>();", content);
+        Assert.Contains("builder.Services.AddSingleton<IHardwareOrchestrator>(sp => sp.GetRequiredService<HardwareOrchestrator>());", content);
+    }
 }
+
+

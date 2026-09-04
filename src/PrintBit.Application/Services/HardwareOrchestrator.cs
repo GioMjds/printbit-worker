@@ -15,10 +15,10 @@ namespace PrintBit.Application.Services;
 public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
 {
     private readonly ILogger<HardwareOrchestrator> _logger;
-    private readonly CoinInsertedHandler _coinHandler;
-    private readonly StartPrintHandler _printHandler;
-    private readonly TransactionStateMachine _stateMachine;
-    private readonly INamedPipeServer _pipeServer;
+    private readonly CoinInsertedHandler? _coinHandler;
+    private readonly StartPrintHandler? _printHandler;
+    private readonly TransactionStateMachine? _stateMachine;
+    private readonly INamedPipeServer? _pipeServer;
     private readonly ISerialConnection _serialConnection;
     private readonly IEsp32Device _esp32Device;
     private readonly ICoinAcceptor _coinAcceptor;
@@ -26,37 +26,65 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
     private readonly CoinPulseDecoder _pulseDecoder;
     private readonly IWorkerEventPipeClient? _eventPipeClient;
 
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public HardwareOrchestrator(
         ILogger<HardwareOrchestrator> logger,
-        CoinInsertedHandler coinHandler,
-        StartPrintHandler printHandler,
-        TransactionStateMachine stateMachine,
-        INamedPipeServer pipeServer,
         ISerialConnection serialConnection,
         IEsp32Device esp32Device,
         ICoinAcceptor coinAcceptor,
         IHopper hopper,
         CoinPulseDecoder pulseDecoder,
+        CoinInsertedHandler? coinHandler = null,
+        StartPrintHandler? printHandler = null,
+        TransactionStateMachine? stateMachine = null,
+        INamedPipeServer? pipeServer = null,
         IWorkerEventPipeClient? eventPipeClient = null)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _coinHandler = coinHandler ?? throw new ArgumentNullException(nameof(coinHandler));
-        _printHandler = printHandler ?? throw new ArgumentNullException(nameof(printHandler));
-        _stateMachine = stateMachine ?? throw new ArgumentNullException(nameof(stateMachine));
-        _pipeServer = pipeServer ?? throw new ArgumentNullException(nameof(pipeServer));
         _serialConnection = serialConnection ?? throw new ArgumentNullException(nameof(serialConnection));
         _esp32Device = esp32Device ?? throw new ArgumentNullException(nameof(esp32Device));
         _coinAcceptor = coinAcceptor ?? throw new ArgumentNullException(nameof(coinAcceptor));
         _hopper = hopper ?? throw new ArgumentNullException(nameof(hopper));
         _pulseDecoder = pulseDecoder ?? throw new ArgumentNullException(nameof(pulseDecoder));
+
+        _coinHandler = coinHandler;
+        _printHandler = printHandler;
+        _stateMachine = stateMachine;
+        _pipeServer = pipeServer;
         _eventPipeClient = eventPipeClient;
 
         _serialConnection.LineReceived += OnLineReceived;
         _coinAcceptor.CoinAccepted += OnCoinAccepted;
         _coinAcceptor.CoinRejected += OnCoinRejected;
         _hopper.ProgressReceived += OnHopperProgressReceived;
+    }
+
+    public HardwareOrchestrator(
+        ILogger<HardwareOrchestrator> logger,
+        CoinInsertedHandler? coinHandler,
+        StartPrintHandler? printHandler,
+        TransactionStateMachine? stateMachine,
+        INamedPipeServer? pipeServer,
+        ISerialConnection serialConnection,
+        IEsp32Device esp32Device,
+        ICoinAcceptor coinAcceptor,
+        IHopper hopper,
+        CoinPulseDecoder pulseDecoder,
+        IWorkerEventPipeClient? eventPipeClient = null)
+        : this(
+            logger,
+            serialConnection,
+            esp32Device,
+            coinAcceptor,
+            hopper,
+            pulseDecoder,
+            coinHandler,
+            printHandler,
+            stateMachine,
+            pipeServer,
+            eventPipeClient)
+    {
     }
 
     public bool IsCoinSlotLocked => _coinAcceptor.IsLocked;
@@ -107,24 +135,27 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
         switch (message.Type)
         {
             case Esp32MessageType.CoinInserted:
-                _coinHandler.Handle(
+                _coinHandler?.Handle(
                     new CoinInsertedEvent
                     {
                         Amount = message.Value ?? 0
                     });
 
-                await _pipeServer.BroadcastAsync(
-                    new PipeMessage
-                    {
-                        Type = PipeMessageType.CoinInserted,
-                        Payload = JsonSerializer.Serialize(
-                            new
-                            {
-                                amount = message.Value
-                            })
-                    });
+                if (_pipeServer != null)
+                {
+                    await _pipeServer.BroadcastAsync(
+                        new PipeMessage
+                        {
+                            Type = PipeMessageType.CoinInserted,
+                            Payload = JsonSerializer.Serialize(
+                                new
+                                {
+                                    amount = message.Value
+                                })
+                        });
+                }
 
-                if (_stateMachine.CurrentState == TransactionState.ReadyToPrint)
+                if (_stateMachine != null && _stateMachine.CurrentState == TransactionState.ReadyToPrint && _pipeServer != null)
                 {
                     await _pipeServer.BroadcastAsync(
                         new PipeMessage
@@ -144,16 +175,19 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
 
                 break;
             case Esp32MessageType.Heartbeat:
-                await _pipeServer.BroadcastAsync(
-                    new PipeMessage
-                    {
-                        Type = PipeMessageType.HardwareStatus,
-                        Payload = JsonSerializer.Serialize(
-                            new
-                            {
-                                heartbeat = true
-                            })
-                    });
+                if (_pipeServer != null)
+                {
+                    await _pipeServer.BroadcastAsync(
+                        new PipeMessage
+                        {
+                            Type = PipeMessageType.HardwareStatus,
+                            Payload = JsonSerializer.Serialize(
+                                new
+                                {
+                                    heartbeat = true
+                                })
+                        });
+                }
                 break;
             default:
                 _logger.LogDebug(
@@ -168,6 +202,12 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
         string source,
         CancellationToken cancellationToken = default)
     {
+        if (_stateMachine is null || _pipeServer is null || _printHandler is null)
+        {
+            _logger.LogWarning("Print request rejected: print pipeline is not configured.");
+            return false;
+        }
+
         if (_stateMachine.CurrentState != TransactionState.ReadyToPrint)
         {
             _logger.LogWarning(
@@ -254,6 +294,11 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
             return;
         }
 
+        if (_stateMachine is null || _pipeServer is null)
+        {
+            return;
+        }
+
         _logger.LogInformation(
             "Reset transaction requested by named pipe client");
 
@@ -312,27 +357,30 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
         try
         {
             _logger.LogInformation("Coin accepted: {Amount}", amount);
-            _coinHandler.Handle(new CoinInsertedEvent { Amount = amount });
+            _coinHandler?.Handle(new CoinInsertedEvent { Amount = amount });
 
-            _ = _pipeServer.BroadcastAsync(new PipeMessage
-            {
-                Type = PipeMessageType.CoinInserted,
-                Payload = JsonSerializer.Serialize(new { amount })
-            });
-
-            if (_stateMachine.CurrentState == TransactionState.ReadyToPrint)
+            if (_pipeServer != null)
             {
                 _ = _pipeServer.BroadcastAsync(new PipeMessage
                 {
-                    Type = PipeMessageType.TransactionStatus,
-                    Payload = JsonSerializer.Serialize(new
-                    {
-                        state = _stateMachine.CurrentState.ToString(),
-                        balance = _stateMachine.CurrentBalance
-                    })
+                    Type = PipeMessageType.CoinInserted,
+                    Payload = JsonSerializer.Serialize(new { amount })
                 });
 
-                _logger.LogInformation("Transaction is ready. Waiting for explicit print confirmation trigger.");
+                if (_stateMachine != null && _stateMachine.CurrentState == TransactionState.ReadyToPrint)
+                {
+                    _ = _pipeServer.BroadcastAsync(new PipeMessage
+                    {
+                        Type = PipeMessageType.TransactionStatus,
+                        Payload = JsonSerializer.Serialize(new
+                        {
+                            state = _stateMachine.CurrentState.ToString(),
+                            balance = _stateMachine.CurrentBalance
+                        })
+                    });
+
+                    _logger.LogInformation("Transaction is ready. Waiting for explicit print confirmation trigger.");
+                }
             }
         }
         catch (Exception ex)
