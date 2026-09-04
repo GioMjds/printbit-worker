@@ -42,6 +42,8 @@ public class SerialConnection : ISerialConnection, IDisposable
 
     public void Connect(string portName, int baudRate)
     {
+        (bool isConnected, string? port, string? error)? eventToFire = null;
+
         lock (_connectionLock)
         {
             if (IsConnected)
@@ -57,27 +59,48 @@ public class SerialConnection : ISerialConnection, IDisposable
                 _serialPort.Open();
 
                 _currentPortName = portName;
-                ConnectionChanged?.Invoke(this, (true, portName, null));
+                eventToFire = (true, portName, null);
             }
             catch (Exception ex)
             {
                 var failedPort = portName;
                 DisconnectInternal(suppressEvent: true);
-                ConnectionChanged?.Invoke(this, (false, failedPort, ex.Message));
+                eventToFire = (false, failedPort, ex.Message);
                 throw;
             }
+            finally
+            {
+                // If an exception occurs, fire before re-throwing
+                if (eventToFire.HasValue && !eventToFire.Value.isConnected)
+                {
+                    ConnectionChanged?.Invoke(this, eventToFire.Value);
+                    eventToFire = null;
+                }
+            }
+        }
+
+        if (eventToFire.HasValue)
+        {
+            ConnectionChanged?.Invoke(this, eventToFire.Value);
         }
     }
 
     public void Disconnect()
     {
+        (bool isConnected, string? port, string? error)? eventToFire = null;
+
         lock (_connectionLock)
         {
-            DisconnectInternal(suppressEvent: false);
+            eventToFire = DisconnectInternal(suppressEvent: false);
+        }
+
+        if (eventToFire.HasValue)
+        {
+            ConnectionChanged?.Invoke(this, eventToFire.Value);
         }
     }
 
-    private void DisconnectInternal(bool suppressEvent)
+    private (bool isConnected, string? port, string? error)? DisconnectInternal(bool suppressEvent)
     {
         var port = _currentPortName;
         var wasConnected = IsConnected;
@@ -107,8 +130,10 @@ public class SerialConnection : ISerialConnection, IDisposable
 
         if (!suppressEvent && (wasConnected || port != null))
         {
-            ConnectionChanged?.Invoke(this, (false, port, null));
+            return (false, port, null);
         }
+
+        return null;
     }
 
     public void SendLine(string data)
@@ -133,17 +158,19 @@ public class SerialConnection : ISerialConnection, IDisposable
 
     private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
     {
-        if (_serialPort is null || !_serialPort.IsOpen)
+        var port = _serialPort;
+        if (port is null || !port.IsOpen)
             return;
 
         try
         {
-            var data = _serialPort.ReadExisting();
+            var data = port.ReadExisting();
             ProcessIncomingData(data);
         }
         catch (Exception)
         {
-            // Ignore unexpected read errors on abrupt port disconnects
+            // Port read error (e.g. abrupt USB unplug) - trigger disconnect
+            Disconnect();
         }
     }
 

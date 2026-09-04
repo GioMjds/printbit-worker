@@ -30,7 +30,10 @@ public sealed class DefaultSerialPortAdapter : ISerialPortAdapter
 
     public DefaultSerialPortAdapter(string portName, int baudRate)
     {
-        _port = new SerialPort(portName, baudRate);
+        _port = new SerialPort(portName, baudRate)
+        {
+            WriteTimeout = 3000
+        };
     }
 
     public bool IsOpen => _port.IsOpen;
