@@ -172,7 +172,14 @@ public sealed class CoinPulseDecoder : IDisposable
     {
         foreach (var action in events)
         {
-            action();
+            try
+            {
+                action();
+            }
+            catch
+            {
+                // Prevent downstream subscriber exceptions from terminating ThreadPool / timer thread
+            }
         }
     }
 
