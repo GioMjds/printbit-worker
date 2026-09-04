@@ -452,15 +452,16 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                 result.Outcome,
                 sw.ElapsedMilliseconds);
         }
-
-        var responseJson = JsonSerializer.Serialize(result, WorkerCommandParser.JsonOptions) + "\n";
-        var responseBytes = Encoding.UTF8.GetBytes(responseJson);
-
-        await outputStream.WriteAsync(responseBytes, cancellationToken);
-        await outputStream.FlushAsync(cancellationToken);
-
-        return result;
     }
+
+    var responseJson = JsonSerializer.Serialize(result, WorkerCommandParser.JsonOptions) + "\n";
+    var responseBytes = Encoding.UTF8.GetBytes(responseJson);
+
+    await outputStream.WriteAsync(responseBytes, cancellationToken);
+    await outputStream.FlushAsync(cancellationToken);
+
+    return result;
 }
 }
+
 
