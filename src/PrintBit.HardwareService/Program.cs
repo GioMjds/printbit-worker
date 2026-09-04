@@ -1,10 +1,15 @@
+using PrintBit.Application.Services;
+using PrintBit.Hardware.Devices.CoinAcceptor;
+using PrintBit.Hardware.Devices.ESP32;
+using PrintBit.Hardware.Devices.Hopper;
 using PrintBit.HardwareService.Services;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.DocumentConversion;
 using PrintBit.Infrastructure.Services.PrintService;
-using PrintBit.Shared.Configurations;
+using PrintBit.Infrastructure.Services.SerialService;
 using PrintBit.Infrastructure.Windows.PowerMonitoring;
 using PrintBit.Infrastructure.Windows.PrinterMonitoring;
+using PrintBit.Shared.Configurations;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -53,6 +58,16 @@ builder.Services.AddHostedService<PrintQueueWatcher>();
 builder.Services.AddSingleton<WorkerEventPipeClient>();
 builder.Services.AddSingleton<IWorkerEventPipeClient>(
     sp => sp.GetRequiredService<WorkerEventPipeClient>());
+
+// Hardware serial, devices, and orchestration
+builder.Services.AddSingleton<ISerialConnection, SerialConnection>();
+builder.Services.AddHostedService<SerialHostedService>();
+builder.Services.AddSingleton<IEsp32Device, Esp32Device>();
+builder.Services.AddSingleton<CoinPulseDecoder>();
+builder.Services.AddSingleton<ICoinAcceptor, CoinAcceptorDevice>();
+builder.Services.AddSingleton<IHopper, HopperDevice>();
+builder.Services.AddSingleton<HardwareOrchestrator>();
+builder.Services.AddSingleton<IHardwareOrchestrator>(sp => sp.GetRequiredService<HardwareOrchestrator>());
 
 var host = builder.Build();
 
