@@ -18,7 +18,7 @@ public sealed class CoinAcceptorDevice : ICoinAcceptor, IDisposable
     private readonly ILogger<CoinAcceptorDevice> _logger;
     private readonly ConcurrentDictionary<string, string> _locks = new();
 
-    private bool _disposed;
+    private volatile bool _disposed;
 
     /// <summary>
     /// Gets a value indicating whether coin acceptance is currently locked,
@@ -107,9 +107,10 @@ public sealed class CoinAcceptorDevice : ICoinAcceptor, IDisposable
             return;
         }
 
-        if (!_locks.IsEmpty)
+        var activeLock = _locks.FirstOrDefault();
+        if (activeLock.Key is not null)
         {
-            var lockReasonOrOwner = _locks.Values.FirstOrDefault() ?? "locked";
+            var lockReasonOrOwner = string.IsNullOrWhiteSpace(activeLock.Value) ? activeLock.Key : activeLock.Value;
             _logger.LogInformation("Coin value {Value} rejected: active session lock ({Reason})", coinValue, lockReasonOrOwner);
             try
             {
