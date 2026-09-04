@@ -4,7 +4,7 @@ using PrintBit.Infrastructure.Services.SerialService;
 
 namespace PrintBit.Hardware.Devices.ESP32;
 
-public class Esp32Device : IEsp32Device, IDisposable
+public sealed class Esp32Device : IEsp32Device, IDisposable
 {
     private readonly ILogger<Esp32Device> _logger;
     private readonly ISerialConnection _serialConnection;
@@ -92,8 +92,9 @@ public class Esp32Device : IEsp32Device, IDisposable
 
     public void SendKioskIpAnnouncement(string ip, int port, string path)
     {
-        ArgumentNullException.ThrowIfNull(ip);
-        ArgumentNullException.ThrowIfNull(path);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ip);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
         var trimmedIp = ip.Trim();
         var trimmedPath = path.Trim();
@@ -106,7 +107,8 @@ public class Esp32Device : IEsp32Device, IDisposable
 
     public void SendWifiCommand(string action)
     {
-        ArgumentNullException.ThrowIfNull(action);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
 
         var trimmedAction = action.Trim();
         var command = $"WIFI {trimmedAction}";
@@ -160,5 +162,6 @@ public class Esp32Device : IEsp32Device, IDisposable
         _disposed = true;
 
         _serialConnection.LineReceived -= OnLineReceived;
+        GC.SuppressFinalize(this);
     }
 }
