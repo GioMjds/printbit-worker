@@ -10,6 +10,11 @@ public enum WorkerPrintEventType
     PrinterError = 5,
     PowerStatusChanged = 6,
     PowerStatusSnapshot = 7,
-    PrinterStatusSnapshot = 8
+    PrinterStatusSnapshot = 8,
+    CoinInserted = 9,
+    CoinRejected = 10,
+    HopperProgress = 11,
+    HopperDispensed = 12,
+    HardwareStatus = 13
 }
 

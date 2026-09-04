@@ -84,4 +84,25 @@ public sealed record WorkerPrintEvent
 
     [JsonPropertyName("powerSequence")]
     public long? PowerSequence { get; init; }
+
+    [JsonPropertyName("coinValue")]
+    public int? CoinValue { get; init; }
+
+    [JsonPropertyName("rejectReason")]
+    public string? RejectReason { get; init; }
+
+    [JsonPropertyName("dispensedCoins")]
+    public int? DispensedCoins { get; init; }
+
+    [JsonPropertyName("totalCoins")]
+    public int? TotalCoins { get; init; }
+
+    [JsonPropertyName("errorCode")]
+    public string? ErrorCode { get; init; }
+
+    [JsonPropertyName("hardwareRequestId")]
+    public string? HardwareRequestId { get; init; }
+
+    [JsonPropertyName("requestId")]
+    public string? RequestId { get; init; }
 }

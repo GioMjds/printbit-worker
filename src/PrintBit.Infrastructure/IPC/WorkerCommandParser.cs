@@ -202,6 +202,219 @@ public static class WorkerCommandParser
         return TryParse(line, maxBytes, out command, out errorDetail, out _);
     }
 
+    public static bool IsHardwareCommandType(string? type)
+    {
+        if (string.IsNullOrWhiteSpace(type))
+        {
+            return false;
+        }
+
+        return string.Equals(type, "DispenseCoins", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "LockCoinSlot", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "UnlockCoinSlot", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "AnnounceKioskIp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool TryParseHardwareCommand(
+        string? line,
+        int maxBytes,
+        [NotNullWhen(true)] out WorkerHardwareCommand? command,
+        [NotNullWhen(false)] out string? errorDetail,
+        out string requestId,
+        out string? commandType)
+    {
+        command = null;
+        errorDetail = null;
+        requestId = string.Empty;
+        commandType = null;
+
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            errorDetail = "Payload is empty";
+            return false;
+        }
+
+        var limit = maxBytes > 0 ? maxBytes : DefaultMaxMessageBytes;
+        if (Encoding.UTF8.GetByteCount(line) > limit)
+        {
+            errorDetail = $"Payload exceeds maximum allowed size of {limit} bytes";
+            return false;
+        }
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(line);
+        }
+        catch (JsonException ex)
+        {
+            errorDetail = $"Malformed JSON: {ex.Message}";
+            return false;
+        }
+
+        using (doc)
+        {
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                errorDetail = "Payload must be a JSON object";
+                return false;
+            }
+
+            if (TryGetPropertyCaseInsensitive(doc.RootElement, "requestId", out var reqElem) &&
+                reqElem.ValueKind == JsonValueKind.String)
+            {
+                requestId = reqElem.GetString() ?? string.Empty;
+            }
+
+            if (!TryGetPropertyCaseInsensitive(doc.RootElement, "type", out var typeElem) ||
+                typeElem.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(typeElem.GetString()))
+            {
+                errorDetail = "Command type is required";
+                return false;
+            }
+
+            commandType = typeElem.GetString();
+
+            if (string.IsNullOrWhiteSpace(requestId))
+            {
+                errorDetail = "RequestId is required";
+                return false;
+            }
+
+            if (string.Equals(commandType, "DispenseCoins", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "coinCount", out var coinCountElem) ||
+                    coinCountElem.ValueKind != JsonValueKind.Number ||
+                    !coinCountElem.TryGetInt32(out var coinCount) ||
+                    coinCount <= 0)
+                {
+                    errorDetail = "CoinCount is required and must be greater than 0";
+                    return false;
+                }
+
+                int? timeoutMs = null;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "timeoutMs", out var timeoutElem) &&
+                    timeoutElem.ValueKind == JsonValueKind.Number &&
+                    timeoutElem.TryGetInt32(out var tMs) &&
+                    tMs > 0)
+                {
+                    timeoutMs = tMs;
+                }
+
+                command = new DispenseCoinsCommand
+                {
+                    RequestId = requestId,
+                    CoinCount = coinCount,
+                    TimeoutMs = timeoutMs
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "LockCoinSlot", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "ownerId", out var ownerElem) ||
+                    ownerElem.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(ownerElem.GetString()))
+                {
+                    errorDetail = "OwnerId is required";
+                    return false;
+                }
+
+                string? reason = null;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "reason", out var reasonElem) &&
+                    reasonElem.ValueKind == JsonValueKind.String)
+                {
+                    reason = reasonElem.GetString();
+                }
+
+                command = new LockCoinSlotCommand
+                {
+                    RequestId = requestId,
+                    OwnerId = ownerElem.GetString()!,
+                    Reason = reason
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "UnlockCoinSlot", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "ownerId", out var ownerElem) ||
+                    ownerElem.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(ownerElem.GetString()))
+                {
+                    errorDetail = "OwnerId is required";
+                    return false;
+                }
+
+                command = new UnlockCoinSlotCommand
+                {
+                    RequestId = requestId,
+                    OwnerId = ownerElem.GetString()!
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "AnnounceKioskIp", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "ip", out var ipElem) ||
+                    ipElem.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(ipElem.GetString()))
+                {
+                    errorDetail = "Ip is required";
+                    return false;
+                }
+
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "port", out var portElem) ||
+                    portElem.ValueKind != JsonValueKind.Number ||
+                    !portElem.TryGetInt32(out var port) ||
+                    port <= 0)
+                {
+                    errorDetail = "Port is required and must be greater than 0";
+                    return false;
+                }
+
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "path", out var pathElem) ||
+                    pathElem.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(pathElem.GetString()))
+                {
+                    errorDetail = "Path is required";
+                    return false;
+                }
+
+                command = new AnnounceKioskIpCommand
+                {
+                    RequestId = requestId,
+                    Ip = ipElem.GetString()!,
+                    Port = port,
+                    Path = pathElem.GetString()!
+                };
+                return true;
+            }
+            else
+            {
+                errorDetail = $"Unknown command type: {commandType}";
+                return false;
+            }
+        }
+    }
+
+    public static bool TryParseHardwareCommand(
+        string? line,
+        int maxBytes,
+        [NotNullWhen(true)] out WorkerHardwareCommand? command,
+        [NotNullWhen(false)] out string? errorDetail,
+        out string requestId)
+    {
+        return TryParseHardwareCommand(line, maxBytes, out command, out errorDetail, out requestId, out _);
+    }
+
+    public static bool TryParseHardwareCommand(
+        string? line,
+        int maxBytes,
+        [NotNullWhen(true)] out WorkerHardwareCommand? command,
+        [NotNullWhen(false)] out string? errorDetail)
+    {
+        return TryParseHardwareCommand(line, maxBytes, out command, out errorDetail, out _, out _);
+    }
+
     private static bool TryGetPropertyCaseInsensitive(JsonElement element, string propertyName, out JsonElement value)
     {
         foreach (var prop in element.EnumerateObject())

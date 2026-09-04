@@ -106,13 +106,37 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
 
     public bool IsDispensingCoins => _hopper.IsDispensing;
 
-    public Task<HopperDispenseResult> DispenseCoinsAsync(
+    public async Task<HopperDispenseResult> DispenseCoinsAsync(
         string requestId,
         int coinCount,
         int? timeoutMs = null,
         CancellationToken ct = default)
     {
-        return _hopper.DispenseAsync(requestId, coinCount, timeoutMs, ct);
+        var result = await _hopper.DispenseAsync(requestId, coinCount, timeoutMs, ct);
+
+        if (_eventPipeClient != null)
+        {
+            try
+            {
+                await _eventPipeClient.SendAsync(new WorkerPrintEvent
+                {
+                    Type = WorkerPrintEventType.HopperDispensed,
+                    HardwareRequestId = requestId,
+                    RequestId = requestId,
+                    DispensedCoins = result.DispensedCoins,
+                    TotalCoins = coinCount,
+                    ErrorCode = result.ErrorCode,
+                    Message = result.Message,
+                    TimestampUtc = DateTime.UtcNow
+                }, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error broadcasting HopperDispensed event for {RequestId}", requestId);
+            }
+        }
+
+        return result;
     }
 
     public void AnnounceKioskIp(string ip, int port, string path)
@@ -173,6 +197,16 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
                         "Transaction is ready. Waiting for explicit print confirmation trigger.");
                 }
 
+                if (_eventPipeClient != null)
+                {
+                    _ = _eventPipeClient.SendAsync(new WorkerPrintEvent
+                    {
+                        Type = WorkerPrintEventType.CoinInserted,
+                        CoinValue = message.Value ?? 0,
+                        TimestampUtc = DateTime.UtcNow
+                    });
+                }
+
                 break;
             case Esp32MessageType.Heartbeat:
                 if (_pipeServer != null)
@@ -187,6 +221,16 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
                                     heartbeat = true
                                 })
                         });
+                }
+
+                if (_eventPipeClient != null)
+                {
+                    _ = _eventPipeClient.SendAsync(new WorkerPrintEvent
+                    {
+                        Type = WorkerPrintEventType.HardwareStatus,
+                        Message = "Heartbeat",
+                        TimestampUtc = DateTime.UtcNow
+                    });
                 }
                 break;
             default:
@@ -382,6 +426,16 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
                     _logger.LogInformation("Transaction is ready. Waiting for explicit print confirmation trigger.");
                 }
             }
+
+            if (_eventPipeClient != null)
+            {
+                _ = _eventPipeClient.SendAsync(new WorkerPrintEvent
+                {
+                    Type = WorkerPrintEventType.CoinInserted,
+                    CoinValue = amount,
+                    TimestampUtc = DateTime.UtcNow
+                });
+            }
         }
         catch (Exception ex)
         {
@@ -397,6 +451,17 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
         }
 
         _logger.LogWarning("Coin rejected: Value={Value}, Reason={Reason}", args.Value, args.Reason);
+
+        if (_eventPipeClient != null)
+        {
+            _ = _eventPipeClient.SendAsync(new WorkerPrintEvent
+            {
+                Type = WorkerPrintEventType.CoinRejected,
+                CoinValue = args.Value,
+                RejectReason = args.Reason,
+                TimestampUtc = DateTime.UtcNow
+            });
+        }
     }
 
     private void OnHopperProgressReceived(object? sender, (string RequestId, int Dispensed, int Total) args)
@@ -407,6 +472,19 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
         }
 
         _logger.LogInformation("Hopper progress for {RequestId}: {Dispensed}/{Total}", args.RequestId, args.Dispensed, args.Total);
+
+        if (_eventPipeClient != null)
+        {
+            _ = _eventPipeClient.SendAsync(new WorkerPrintEvent
+            {
+                Type = WorkerPrintEventType.HopperProgress,
+                HardwareRequestId = args.RequestId,
+                RequestId = args.RequestId,
+                DispensedCoins = args.Dispensed,
+                TotalCoins = args.Total,
+                TimestampUtc = DateTime.UtcNow
+            });
+        }
     }
 
     public void Dispose()
