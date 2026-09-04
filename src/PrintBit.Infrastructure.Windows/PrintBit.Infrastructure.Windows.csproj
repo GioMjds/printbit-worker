@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\PrintBit.Application\PrintBit.Application.csproj" />
     <ProjectReference Include="..\PrintBit.Infrastructure\PrintBit.Infrastructure.csproj" />
     <ProjectReference Include="..\PrintBit.Shared\PrintBit.Shared.csproj" />
   </ItemGroup>
