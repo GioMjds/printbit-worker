@@ -462,3 +462,5 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
         return result;
     }
 }
+}
+
