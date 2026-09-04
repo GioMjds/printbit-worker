@@ -1,11 +1,13 @@
-﻿namespace PrintBit.Hardware.Devices.ESP32
+using PrintBit.Hardware.Devices.ESP32.Protocol;
+
+namespace PrintBit.Hardware.Devices.ESP32;
+
+public interface IEsp32Device
 {
-    public interface IEsp32Device
-    {
-        bool IsConnected { get; }
-        void Connect(string portName, int baudRate);
-        void Disconnect();
-        void SendCommand(string command);
-        event EventHandler<Esp32Message>? MessageReceived;
-    }
+    string? ApIp { get; }
+    string? StaIp { get; }
+    string? KioskIp { get; }
+    event EventHandler<Esp32TelemetryEvent>? TelemetryReceived;
+    void SendKioskIpAnnouncement(string ip, int port, string path);
+    void SendWifiCommand(string action);
 }
