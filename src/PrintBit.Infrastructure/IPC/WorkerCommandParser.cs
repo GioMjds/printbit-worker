@@ -365,9 +365,9 @@ public static class WorkerCommandParser
                 if (!TryGetPropertyCaseInsensitive(doc.RootElement, "port", out var portElem) ||
                     portElem.ValueKind != JsonValueKind.Number ||
                     !portElem.TryGetInt32(out var port) ||
-                    port <= 0)
+                    port <= 0 || port > 65535)
                 {
-                    errorDetail = "Port is required and must be greater than 0";
+                    errorDetail = "Port is required and must be between 1 and 65535";
                     return false;
                 }
 

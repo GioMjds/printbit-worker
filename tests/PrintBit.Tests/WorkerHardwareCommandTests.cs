@@ -453,5 +453,107 @@ public class WorkerHardwareCommandTests
         Assert.Same(orchestratorSingleton, injectedOrchestrator);
     }
 
+    [Fact]
+    public async Task ProcessRequestAsync_OrchestratorUnavailable_ReturnsStructuredUnavailableError()
+    {
+        var service = new WorkerCommandPipeHostedService(
+            _loggerMock.Object,
+            _recoveryServiceMock.Object,
+            Options.Create(_ipcSettings),
+            hardwareOrchestrator: null);
+
+        const string json = "{\"requestId\":\"req-no-orch\",\"type\":\"LockCoinSlot\",\"ownerId\":\"session-1\"}\n";
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(json));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.Null(result);
+        var responseString = Encoding.UTF8.GetString(outputStream.ToArray());
+        var error = JsonSerializer.Deserialize<HardwareErrorResponse>(responseString, WorkerCommandParser.JsonOptions);
+
+        Assert.NotNull(error);
+        Assert.Equal("req-no-orch", error.RequestId);
+        Assert.Equal("HARDWARE_ORCHESTRATOR_UNAVAILABLE", error.ErrorCode);
+        Assert.False(error.Success);
+    }
+
+    [Fact]
+    public async Task ProcessRequestAsync_OrchestratorThrowsException_ReturnsCommandExecutionError()
+    {
+        var service = CreateHostedService();
+
+        _orchestratorMock
+            .Setup(o => o.DispenseCoinsAsync("req-err", 5, null, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("Hardware driver crashed"));
+
+        const string json = "{\"requestId\":\"req-err\",\"type\":\"DispenseCoins\",\"coinCount\":5}\n";
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(json));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.Null(result);
+        var responseString = Encoding.UTF8.GetString(outputStream.ToArray());
+        var error = JsonSerializer.Deserialize<HardwareErrorResponse>(responseString, WorkerCommandParser.JsonOptions);
+
+        Assert.NotNull(error);
+        Assert.Equal("req-err", error.RequestId);
+        Assert.Equal("COMMAND_EXECUTION_ERROR", error.ErrorCode);
+        Assert.False(error.Success);
+        Assert.Contains("Hardware driver crashed", error.Message);
+    }
+
+    [Fact]
+    public async Task ProcessRequestAsync_DispenseCoinsFailure_ReturnsStructuredFailureResponse()
+    {
+        var service = CreateHostedService();
+
+        _orchestratorMock
+            .Setup(o => o.DispenseCoinsAsync("req-fail", 10, null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new HopperDispenseResult
+            {
+                Success = false,
+                DispensedCoins = 3,
+                ErrorCode = "TIMEOUT",
+                Message = "Hopper timed out"
+            });
+
+        const string json = "{\"requestId\":\"req-fail\",\"type\":\"DispenseCoins\",\"coinCount\":10}\n";
+        using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(json));
+        using var outputStream = new MemoryStream();
+
+        var result = await service.ProcessRequestAsync(inputStream, outputStream, CancellationToken.None);
+
+        Assert.Null(result);
+        var responseString = Encoding.UTF8.GetString(outputStream.ToArray());
+        var response = JsonSerializer.Deserialize<DispenseCoinsResponse>(responseString, WorkerCommandParser.JsonOptions);
+
+        Assert.NotNull(response);
+        Assert.Equal("req-fail", response.RequestId);
+        Assert.False(response.Success);
+        Assert.Equal(3, response.DispensedCoins);
+        Assert.Equal("TIMEOUT", response.ErrorCode);
+        Assert.Equal("Hopper timed out", response.Message);
+    }
+
+    [Fact]
+    public void Parser_AnnounceKioskIp_PortAbove65535_ReturnsFalse()
+    {
+        const string json = "{\"requestId\":\"req-port-high\",\"type\":\"AnnounceKioskIp\",\"ip\":\"192.168.1.1\",\"port\":70000,\"path\":\"/\"}";
+
+        var parsed = WorkerCommandParser.TryParseHardwareCommand(
+            json,
+            maxBytes: 8192,
+            out var command,
+            out var errorDetail,
+            out var requestId,
+            out var commandType);
+
+        Assert.False(parsed);
+        Assert.Null(command);
+        Assert.Contains("65535", errorDetail);
+    }
+
     #endregion
 }

@@ -204,7 +204,7 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                 // Malformed JSON -> will be handled by WorkerCommandParser.TryParse below
             }
 
-            if (WorkerCommandParser.IsHardwareCommandType(peekType))
+        if (WorkerCommandParser.IsHardwareCommandType(peekType))
         {
             if (!WorkerCommandParser.TryParseHardwareCommand(
                 line,
@@ -262,72 +262,99 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
             }
 
             string hwResponseJson;
-            switch (hwCommand)
+            try
             {
-                case DispenseCoinsCommand dispenseCmd:
-                    var dispenseResult = await _hardwareOrchestrator.DispenseCoinsAsync(
-                        dispenseCmd.RequestId,
-                        dispenseCmd.CoinCount,
-                        dispenseCmd.TimeoutMs,
-                        cancellationToken);
+                switch (hwCommand)
+                {
+                    case DispenseCoinsCommand dispenseCmd:
+                        var dispenseResult = await _hardwareOrchestrator.DispenseCoinsAsync(
+                            dispenseCmd.RequestId,
+                            dispenseCmd.CoinCount,
+                            dispenseCmd.TimeoutMs,
+                            cancellationToken);
 
-                    var dispenseResponse = new DispenseCoinsResponse
-                    {
-                        RequestId = dispenseCmd.RequestId,
-                        Type = "DispenseCoins",
-                        Success = dispenseResult.Success,
-                        DispensedCoins = dispenseResult.DispensedCoins,
-                        ErrorCode = dispenseResult.ErrorCode,
-                        Message = dispenseResult.Message
-                    };
-                    hwResponseJson = JsonSerializer.Serialize(dispenseResponse, WorkerCommandParser.JsonOptions) + "\n";
-                    break;
+                        var dispenseResponse = new DispenseCoinsResponse
+                        {
+                            RequestId = dispenseCmd.RequestId,
+                            Type = "DispenseCoins",
+                            Success = dispenseResult.Success,
+                            DispensedCoins = dispenseResult.DispensedCoins,
+                            ErrorCode = dispenseResult.ErrorCode,
+                            Message = dispenseResult.Message
+                        };
+                        hwResponseJson = JsonSerializer.Serialize(dispenseResponse, WorkerCommandParser.JsonOptions) + "\n";
+                        break;
 
-                case LockCoinSlotCommand lockCmd:
-                    _hardwareOrchestrator.LockCoinSlot(lockCmd.OwnerId, lockCmd.Reason);
-                    var lockResponse = new LockCoinSlotResponse
-                    {
-                        RequestId = lockCmd.RequestId,
-                        Type = "LockCoinSlot",
-                        Success = true
-                    };
-                    hwResponseJson = JsonSerializer.Serialize(lockResponse, WorkerCommandParser.JsonOptions) + "\n";
-                    break;
+                    case LockCoinSlotCommand lockCmd:
+                        _hardwareOrchestrator.LockCoinSlot(lockCmd.OwnerId, lockCmd.Reason);
+                        var lockResponse = new LockCoinSlotResponse
+                        {
+                            RequestId = lockCmd.RequestId,
+                            Type = "LockCoinSlot",
+                            Success = true
+                        };
+                        hwResponseJson = JsonSerializer.Serialize(lockResponse, WorkerCommandParser.JsonOptions) + "\n";
+                        break;
 
-                case UnlockCoinSlotCommand unlockCmd:
-                    var unlocked = _hardwareOrchestrator.UnlockCoinSlot(unlockCmd.OwnerId);
-                    var unlockResponse = new UnlockCoinSlotResponse
-                    {
-                        RequestId = unlockCmd.RequestId,
-                        Type = "UnlockCoinSlot",
-                        Success = true,
-                        Unlocked = unlocked
-                    };
-                    hwResponseJson = JsonSerializer.Serialize(unlockResponse, WorkerCommandParser.JsonOptions) + "\n";
-                    break;
+                    case UnlockCoinSlotCommand unlockCmd:
+                        var unlocked = _hardwareOrchestrator.UnlockCoinSlot(unlockCmd.OwnerId);
+                        var unlockResponse = new UnlockCoinSlotResponse
+                        {
+                            RequestId = unlockCmd.RequestId,
+                            Type = "UnlockCoinSlot",
+                            Success = true,
+                            Unlocked = unlocked
+                        };
+                        hwResponseJson = JsonSerializer.Serialize(unlockResponse, WorkerCommandParser.JsonOptions) + "\n";
+                        break;
 
-                case AnnounceKioskIpCommand announceCmd:
-                    _hardwareOrchestrator.AnnounceKioskIp(announceCmd.Ip, announceCmd.Port, announceCmd.Path);
-                    var announceResponse = new AnnounceKioskIpResponse
-                    {
-                        RequestId = announceCmd.RequestId,
-                        Type = "AnnounceKioskIp",
-                        Success = true
-                    };
-                    hwResponseJson = JsonSerializer.Serialize(announceResponse, WorkerCommandParser.JsonOptions) + "\n";
-                    break;
+                    case AnnounceKioskIpCommand announceCmd:
+                        _hardwareOrchestrator.AnnounceKioskIp(announceCmd.Ip, announceCmd.Port, announceCmd.Path);
+                        var announceResponse = new AnnounceKioskIpResponse
+                        {
+                            RequestId = announceCmd.RequestId,
+                            Type = "AnnounceKioskIp",
+                            Success = true
+                        };
+                        hwResponseJson = JsonSerializer.Serialize(announceResponse, WorkerCommandParser.JsonOptions) + "\n";
+                        break;
 
-                default:
-                    var fallbackResponse = new HardwareErrorResponse
-                    {
-                        RequestId = hwCommand.RequestId,
-                        Type = peekType,
-                        Success = false,
-                        ErrorCode = "UNSUPPORTED_COMMAND",
-                        Message = $"Unsupported hardware command: {peekType}"
-                    };
-                    hwResponseJson = JsonSerializer.Serialize(fallbackResponse, WorkerCommandParser.JsonOptions) + "\n";
-                    break;
+                    default:
+                        var fallbackResponse = new HardwareErrorResponse
+                        {
+                            RequestId = hwCommand.RequestId,
+                            Type = peekType,
+                            Success = false,
+                            ErrorCode = "UNSUPPORTED_COMMAND",
+                            Message = $"Unsupported hardware command: {peekType}"
+                        };
+                        hwResponseJson = JsonSerializer.Serialize(fallbackResponse, WorkerCommandParser.JsonOptions) + "\n";
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _logger.LogError(
+                    ex,
+                    "Unexpected error executing hardware worker command | RequestId={requestId} Type={type} ElapsedMs={elapsedMs}",
+                    hwCommand.RequestId,
+                    peekType,
+                    sw.ElapsedMilliseconds);
+
+                var errorResponse = new HardwareErrorResponse
+                {
+                    RequestId = hwCommand.RequestId,
+                    Type = peekType,
+                    Success = false,
+                    ErrorCode = "COMMAND_EXECUTION_ERROR",
+                    Message = ex.Message
+                };
+
+                var errorJson = JsonSerializer.Serialize(errorResponse, WorkerCommandParser.JsonOptions) + "\n";
+                await outputStream.WriteAsync(Encoding.UTF8.GetBytes(errorJson), cancellationToken);
+                await outputStream.FlushAsync(cancellationToken);
+                return null;
             }
 
             sw.Stop();
@@ -425,9 +452,8 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                 result.Outcome,
                 sw.ElapsedMilliseconds);
         }
-    }
 
-    var responseJson = JsonSerializer.Serialize(result, WorkerCommandParser.JsonOptions) + "\n";
+        var responseJson = JsonSerializer.Serialize(result, WorkerCommandParser.JsonOptions) + "\n";
         var responseBytes = Encoding.UTF8.GetBytes(responseJson);
 
         await outputStream.WriteAsync(responseBytes, cancellationToken);

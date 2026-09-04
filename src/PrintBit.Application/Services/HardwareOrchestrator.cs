@@ -116,24 +116,27 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
 
         if (_eventPipeClient != null)
         {
-            try
+            _ = Task.Run(async () =>
             {
-                await _eventPipeClient.SendAsync(new WorkerPrintEvent
+                try
                 {
-                    Type = WorkerPrintEventType.HopperDispensed,
-                    HardwareRequestId = requestId,
-                    RequestId = requestId,
-                    DispensedCoins = result.DispensedCoins,
-                    TotalCoins = coinCount,
-                    ErrorCode = result.ErrorCode,
-                    Message = result.Message,
-                    TimestampUtc = DateTime.UtcNow
-                }, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error broadcasting HopperDispensed event for {RequestId}", requestId);
-            }
+                    await _eventPipeClient.SendAsync(new WorkerPrintEvent
+                    {
+                        Type = WorkerPrintEventType.HopperDispensed,
+                        HardwareRequestId = requestId,
+                        RequestId = requestId,
+                        DispensedCoins = result.DispensedCoins,
+                        TotalCoins = coinCount,
+                        ErrorCode = result.ErrorCode,
+                        Message = result.Message,
+                        TimestampUtc = DateTime.UtcNow
+                    }, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error broadcasting HopperDispensed event for {RequestId}", requestId);
+                }
+            });
         }
 
         return result;
