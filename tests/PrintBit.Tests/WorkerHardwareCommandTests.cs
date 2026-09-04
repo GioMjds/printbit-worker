@@ -511,13 +511,7 @@ public class WorkerHardwareCommandTests
 
         _orchestratorMock
             .Setup(o => o.DispenseCoinsAsync("req-fail", 10, null, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new HopperDispenseResult
-            {
-                Success = false,
-                DispensedCoins = 3,
-                ErrorCode = "TIMEOUT",
-                Message = "Hopper timed out"
-            });
+            .ReturnsAsync(new HopperDispenseResult(false, "req-fail", 3, "TIMEOUT", "Hopper timed out"));
 
         const string json = "{\"requestId\":\"req-fail\",\"type\":\"DispenseCoins\",\"coinCount\":10}\n";
         using var inputStream = new MemoryStream(Encoding.UTF8.GetBytes(json));
