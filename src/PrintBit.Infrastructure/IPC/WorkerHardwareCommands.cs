@@ -8,6 +8,12 @@ public abstract record WorkerHardwareCommand
     public string RequestId { get; init; } = string.Empty;
 }
 
+public sealed record SimulateCoinCommand : WorkerHardwareCommand
+{
+    [JsonPropertyName("coinValue")]
+    public int CoinValue { get; init; }
+}
+
 public sealed record DispenseCoinsCommand : WorkerHardwareCommand
 {
     [JsonPropertyName("coinCount")]

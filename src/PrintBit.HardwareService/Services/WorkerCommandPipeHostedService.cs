@@ -22,17 +22,23 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
     private readonly IPrinterRecoveryService _recoveryService;
     private readonly IpcSettings _settings;
     private readonly IHardwareOrchestrator? _hardwareOrchestrator;
+    private readonly IWorkerEventPipeClient? _eventPipeClient;
+    private readonly bool _enableCoinSimulation;
 
     public WorkerCommandPipeHostedService(
         ILogger<WorkerCommandPipeHostedService> logger,
         IPrinterRecoveryService recoveryService,
         IOptions<IpcSettings> options,
-        IHardwareOrchestrator? hardwareOrchestrator = null)
+        IHardwareOrchestrator? hardwareOrchestrator = null,
+        IWorkerEventPipeClient? eventPipeClient = null,
+        IOptions<HardwareSettings>? hardwareSettings = null)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _recoveryService = recoveryService ?? throw new ArgumentNullException(nameof(recoveryService));
         _settings = options?.Value ?? new IpcSettings();
         _hardwareOrchestrator = hardwareOrchestrator;
+        _eventPipeClient = eventPipeClient;
+        _enableCoinSimulation = hardwareSettings?.Value.EnableCoinSimulation ?? false;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -83,9 +89,9 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                 catch (IOException ex)
                 {
                     _logger.LogInformation(
-                        ex,
-                        "Worker command pipe client disconnected prematurely on {pipe}",
-                        _settings.WorkerCommandPipeName);
+                        "Worker command pipe client disconnected on {pipe}: {message}",
+                        _settings.WorkerCommandPipeName,
+                        ex.Message);
                 }
                 finally
                 {
@@ -266,6 +272,11 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
             {
                 switch (hwCommand)
                 {
+                    case SimulateCoinCommand simulateCmd:
+                        var simulationResponse = await SimulateCoinAsync(simulateCmd, cancellationToken);
+                        hwResponseJson = JsonSerializer.Serialize(simulationResponse, WorkerCommandParser.JsonOptions) + "\n";
+                        break;
+
                     case DispenseCoinsCommand dispenseCmd:
                         var dispenseResult = await _hardwareOrchestrator.DispenseCoinsAsync(
                             dispenseCmd.RequestId,
@@ -309,7 +320,7 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                         break;
 
                     case AnnounceKioskIpCommand announceCmd:
-                        _hardwareOrchestrator.AnnounceKioskIp(announceCmd.Ip, announceCmd.Port, announceCmd.Path);
+                        _hardwareOrchestrator?.AnnounceKioskIp(announceCmd.Ip, announceCmd.Port, announceCmd.Path);
                         var announceResponse = new AnnounceKioskIpResponse
                         {
                             RequestId = announceCmd.RequestId,
@@ -364,9 +375,20 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                 hwCommand.RequestId,
                 sw.ElapsedMilliseconds);
 
-            var hwResponseBytes = Encoding.UTF8.GetBytes(hwResponseJson);
-            await outputStream.WriteAsync(hwResponseBytes, cancellationToken);
-            await outputStream.FlushAsync(cancellationToken);
+            try
+            {
+                var hwResponseBytes = Encoding.UTF8.GetBytes(hwResponseJson);
+                await outputStream.WriteAsync(hwResponseBytes, cancellationToken);
+                await outputStream.FlushAsync(cancellationToken);
+            }
+            catch (IOException ex)
+            {
+                _logger.LogDebug(
+                    "Worker command pipe client disconnected before hardware response could be delivered | Type={type} RequestId={requestId}: {message}",
+                    peekType,
+                    hwCommand.RequestId,
+                    ex.Message);
+            }
             return null;
         }
         else if (!WorkerCommandParser.TryParse(
@@ -457,11 +479,53 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
     var responseJson = JsonSerializer.Serialize(result, WorkerCommandParser.JsonOptions) + "\n";
     var responseBytes = Encoding.UTF8.GetBytes(responseJson);
 
-    await outputStream.WriteAsync(responseBytes, cancellationToken);
-    await outputStream.FlushAsync(cancellationToken);
+    try
+    {
+        await outputStream.WriteAsync(responseBytes, cancellationToken);
+        await outputStream.FlushAsync(cancellationToken);
+    }
+    catch (IOException ex)
+    {
+        _logger.LogDebug(
+            "Worker command pipe client disconnected before recovery response could be delivered: {message}",
+            ex.Message);
+    }
 
     return result;
 }
-}
 
+    private async Task<HardwareCommandResponse> SimulateCoinAsync(
+        SimulateCoinCommand command, CancellationToken cancellationToken)
+    {
+        var response = new HardwareCommandResponse { RequestId = command.RequestId, Type = "SimulateCoin" };
+        if (!_enableCoinSimulation)
+        {
+            return response with { ErrorCode = "SIMULATION_DISABLED",
+                Message = "Enable HardwareSettings:EnableCoinSimulation in the worker to use SCC." };
+        }
+
+        // Inject a denomination at the hardware-event boundary. No serial device is required.
+        // IsCoinSlotLocked includes both power safety and the coin acceptor's session locks.
+        var locked = _hardwareOrchestrator?.IsCoinSlotLocked ?? false;
+        _logger.LogInformation("[SIMULATED] Coin {Outcome}: {Amount} | RequestId={RequestId}",
+            locked ? "rejected (slot_locked)" : "accepted", command.CoinValue, command.RequestId);
+        var evt = new WorkerPrintEvent
+        {
+            Type = locked ? WorkerPrintEventType.CoinRejected : WorkerPrintEventType.CoinInserted,
+            RequestId = command.RequestId,
+            CoinValue = command.CoinValue,
+            Simulated = true,
+            RejectReason = locked ? "slot_locked" : null,
+            TimestampUtc = DateTime.UtcNow
+        };
+        var delivered = _eventPipeClient != null && await _eventPipeClient.SendAsync(evt, cancellationToken);
+        if (!delivered)
+        {
+            return response with { ErrorCode = "WORKER_EVENT_UNAVAILABLE",
+                Message = "Could not deliver the simulated coin event to Node. Check the return pipe." };
+        }
+        return response with { Success = !locked, ErrorCode = locked ? "slot_locked" : null,
+            Message = locked ? "Coin slot is locked by power safety or an active session." : "Simulated coin event sent to Node." };
+    }
+}
 

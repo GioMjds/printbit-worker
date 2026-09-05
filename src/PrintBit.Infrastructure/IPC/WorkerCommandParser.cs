@@ -209,7 +209,8 @@ public static class WorkerCommandParser
             return false;
         }
 
-        return string.Equals(type, "DispenseCoins", StringComparison.OrdinalIgnoreCase) ||
+        return string.Equals(type, "SimulateCoin", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "DispenseCoins", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(type, "LockCoinSlot", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(type, "UnlockCoinSlot", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(type, "AnnounceKioskIp", StringComparison.OrdinalIgnoreCase);
@@ -282,7 +283,19 @@ public static class WorkerCommandParser
                 return false;
             }
 
-            if (string.Equals(commandType, "DispenseCoins", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(commandType, "SimulateCoin", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "coinValue", out var valueElem) ||
+                    valueElem.ValueKind != JsonValueKind.Number ||
+                    !valueElem.TryGetInt32(out var value) || value is not (1 or 5 or 10 or 20))
+                {
+                    errorDetail = "CoinValue must be 1, 5, 10, or 20";
+                    return false;
+                }
+                command = new SimulateCoinCommand { RequestId = requestId, CoinValue = value };
+                return true;
+            }
+            else if (string.Equals(commandType, "DispenseCoins", StringComparison.OrdinalIgnoreCase))
             {
                 if (!TryGetPropertyCaseInsensitive(doc.RootElement, "coinCount", out var coinCountElem) ||
                     coinCountElem.ValueKind != JsonValueKind.Number ||

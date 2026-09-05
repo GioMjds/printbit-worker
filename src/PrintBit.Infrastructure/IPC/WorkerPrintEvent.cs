@@ -88,6 +88,10 @@ public sealed record WorkerPrintEvent
     [JsonPropertyName("coinValue")]
     public int? CoinValue { get; init; }
 
+    [JsonPropertyName("simulated")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Simulated { get; init; }
+
     [JsonPropertyName("rejectReason")]
     public string? RejectReason { get; init; }
 
