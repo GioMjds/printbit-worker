@@ -178,17 +178,21 @@ emitted on the WMI `WorkOffline` state change.
 
 ### Named Pipe (Node -> Service Command Pipe)
 
-`WorkerCommandPipeHostedService` listens on `IpcSettings.WorkerCommandPipeName` (`printbit-worker-commands`) and handles **line-delimited JSON** recovery commands from the administrative Node.js service.
+`WorkerCommandPipeHostedService` listens on `IpcSettings.WorkerCommandPipeName` (`printbit-worker-commands`) and handles **line-delimited JSON** recovery and hardware commands from the administrative Node.js service.
 
-Each connection receives one JSON line, dispatches one command, writes one single-line JSON `PrinterRecoveryResult`, flushes, and closes.
+Each connection receives one JSON line, dispatches one command, writes one single-line command-specific JSON response, flushes, and closes.
 
 | Command Request Field | Required | Notes |
 |---|---|---|
 | `requestId` | Yes | Non-empty correlation identifier preserved in response |
-| `type` | Yes | `GetPrinterRecoveryStatus` or `AttemptPrinterRecovery` |
+| `type` | Yes | `GetPrinterRecoveryStatus`, `AttemptPrinterRecovery`, or a supported hardware command such as `SimulateCoin` |
 | `timestampUtc` | No | ISO-8601 timestamp |
 
-| Result Response Field | Required | Notes |
+`SimulateCoin` additionally requires an accepted `coinValue` (`1`, `5`, `10`, or `20`) and `HardwareSettings:EnableCoinSimulation = true`. It injects a simulated `CoinInserted` return event without touching the serial coin acceptor, so physical coin-slot session locks do not reject the administrator's simulation.
+
+Recovery commands return a `PrinterRecoveryResult` with the following fields:
+
+| Recovery Response Field | Required | Notes |
 |---|---|---|
 | `requestId` | Yes | Matches request `requestId` |
 | `type` | Yes | `GetPrinterRecoveryStatus` or `AttemptPrinterRecovery` |
@@ -200,6 +204,8 @@ Each connection receives one JSON line, dispatches one command, writes one singl
 | `message` | No | User-safe explanation or error message |
 | `startedAt` | Yes | UTC timestamp when request handling started |
 | `completedAt` | Yes | UTC timestamp when request handling finished |
+
+Hardware commands return command-specific response payloads. `SimulateCoin` returns a `HardwareCommandResponse`: `requestId` and `type` echo the request, `success` reports whether the simulated event was delivered, and `errorCode` / `message` describe disabled simulation or return-pipe delivery failures.
 
 #### Command Outcome Mapping
 
@@ -287,7 +293,7 @@ Dependency direction:
 | `IPrinterRecoveryService` / `PrinterRecoveryService` | Infrastructure / Infrastructure.Windows | Printer recovery service orchestrating typed diagnostics, physical fault avoidance, and bounded native Spooler restart |
 | `IPrintSpoolerController` / `ServiceControllerSpoolerController` | Infrastructure.Windows | Native Windows ServiceController implementation managing Spooler service status and clean restarts |
 | `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; registered as singleton `PrintOperationCoordinator` in `Program.cs` |
-| `WorkerCommandPipeHostedService` | HardwareService | Background service listening on `WorkerCommandPipeName` for recovery commands, dispatching to `IPrinterRecoveryService` and writing single-line JSON responses |
+| `WorkerCommandPipeHostedService` | HardwareService | Background service listening on `WorkerCommandPipeName` for recovery and hardware commands, including feature-gated coin simulation, and writing single-line JSON responses |
 | `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for creating secure Windows ACLs granting admin/system-only access to the command pipe |
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
 | `JobOrchestrator` | Infrastructure | Counts and selects pages, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
@@ -442,7 +448,7 @@ Reset() from any state -> Idle
 - Add values to `Esp32MessageType` and update parser/docs.
 - Add `Esp32Command` constants and update docs.
 - Extend active non-stub classes.
-- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, whole-document dispatch, page-count confidence, print verification behavior, printer pre-flight/recovery status checking, and bounded native spooler recovery.
+- Add/extend tests for `TransactionStateMachine`, handlers, orchestrator gating, IPC reset, administrator coin simulation, whole-document dispatch, page-count confidence, print verification behavior, Epson popup event propagation, printer pre-flight/recovery status checking, and bounded native spooler recovery.
 - Add new `IOptions<T>` config models in `PrintBit.Shared`.
 - Extend `HardwareSettings` and sync docs.
 

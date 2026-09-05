@@ -644,18 +644,16 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                 Message = "Enable HardwareSettings:EnableCoinSimulation in the worker to use SCC." };
         }
 
-        // Inject a denomination at the hardware-event boundary. No serial device is required.
-        // IsCoinSlotLocked includes both power safety and the coin acceptor's session locks.
-        var locked = _hardwareOrchestrator?.IsCoinSlotLocked ?? false;
-        _logger.LogInformation("[SIMULATED] Coin {Outcome}: {Amount} | RequestId={RequestId}",
-            locked ? "rejected (slot_locked)" : "accepted", command.CoinValue, command.RequestId);
+        // Inject a denomination at the hardware-event boundary. No serial device is required,
+        // so physical coin-slot session locks do not apply to an enabled admin simulation.
+        _logger.LogInformation("[SIMULATED] Coin accepted: {Amount} | RequestId={RequestId}",
+            command.CoinValue, command.RequestId);
         var evt = new WorkerPrintEvent
         {
-            Type = locked ? WorkerPrintEventType.CoinRejected : WorkerPrintEventType.CoinInserted,
+            Type = WorkerPrintEventType.CoinInserted,
             RequestId = command.RequestId,
             CoinValue = command.CoinValue,
             Simulated = true,
-            RejectReason = locked ? "slot_locked" : null,
             TimestampUtc = DateTime.UtcNow
         };
         var delivered = _eventPipeClient != null && await _eventPipeClient.SendAsync(evt, cancellationToken);
@@ -664,8 +662,6 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
             return response with { ErrorCode = "WORKER_EVENT_UNAVAILABLE",
                 Message = "Could not deliver the simulated coin event to Node. Check the return pipe." };
         }
-        return response with { Success = !locked, ErrorCode = locked ? "slot_locked" : null,
-            Message = locked ? "Coin slot is locked by power safety or an active session." : "Simulated coin event sent to Node." };
+        return response with { Success = true, Message = "Simulated coin event sent to Node." };
     }
 }
-

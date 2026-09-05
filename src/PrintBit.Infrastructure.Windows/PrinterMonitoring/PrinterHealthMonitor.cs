@@ -61,9 +61,22 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     [DllImport("user32.dll")]
     private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
+    private const uint WmGetText = 0x000D;
+    private const uint SendMessageTimeoutAbortIfHung = 0x0002;
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd,
+        uint msg,
+        UIntPtr wParam,
+        StringBuilder lParam,
+        uint flags,
+        uint timeoutMilliseconds,
+        out UIntPtr result);
+
     private static readonly string[] EpsonErrorKeywords = 
     {
-        "out of paper", "jam", "ink out", "no ink", "door open", "cover open", "offline", "error", "service"
+        "out of paper", "paper out", "jam", "ink out", "no ink", "door open", "cover open", "offline", "error", "service"
     };
 
     public PrinterHealthMonitor(
@@ -444,6 +457,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             var isFatalWmi = IsFatalDetectedErrorState(detectedErrorState);
             var isFatalExtendedStatus =
                 IsFatalExtendedPrinterStatus(extendedPrinterStatus) && extendedPrinterStatus is not (7 or 11);
+            var (hasEpsonPopup, _, _, epsonPopupContent) =
+                CheckEpsonStatusMonitorPopup(_hardwareSettings.PrinterName);
 
             if (_lastOfflineState != isOffline)
             {
@@ -458,16 +473,21 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
 
             lock (_lock)
             {
-                if (isFatalWmi || isFatalExtendedStatus)
+                if (isFatalWmi || isFatalExtendedStatus || hasEpsonPopup)
                 {
                     _fatalErrorCode = isFatalWmi
                         ? detectedErrorState
-                        : extendedPrinterStatus;
+                        : isFatalExtendedStatus
+                            ? extendedPrinterStatus
+                            : 99;
                     _fatalErrorMessage = isFatalWmi
                         ? DetectedErrorStateDescription(detectedErrorState)
-                        : ExtendedPrinterStatusDescription(extendedPrinterStatus);
+                        : isFatalExtendedStatus
+                            ? ExtendedPrinterStatusDescription(extendedPrinterStatus)
+                            : $"Epson Popup: {epsonPopupContent}";
 
-                    var stateIdentifier = $"{detectedErrorState}_{extendedPrinterStatus}";
+                    var stateIdentifier =
+                        $"{detectedErrorState}_{extendedPrinterStatus}_{epsonPopupContent}";
                     if (_lastErrorState != stateIdentifier)
                     {
                         _lastErrorState = stateIdentifier;
@@ -476,7 +496,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                             Type = WorkerPrintEventType.PrinterError,
                             PrinterName = _hardwareSettings.PrinterName,
                             FailureStage = "hardware_error",
-                            Message = $"Printer error ({_fatalErrorMessage})"
+                            Message = $"Printer error ({_fatalErrorMessage})",
+                            ErrorCode = _fatalErrorCode.ToString()
                         };
                     }
                 }
@@ -663,18 +684,17 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                         {
                             if (IsWindowVisible(childHwnd))
                             {
-                                var childSb = new StringBuilder(256);
-                                GetWindowText(childHwnd, childSb, 256);
-                                if (childSb.Length > 0)
+                                string childText = ReadCrossProcessWindowText(childHwnd);
+                                if (childText.Length > 0)
                                 {
-                                    textBuilder.AppendLine(childSb.ToString());
+                                    textBuilder.AppendLine(childText);
                                 }
                             }
                             return true;
                         }, IntPtr.Zero);
 
                         string fullContent = textBuilder.ToString();
-                        bool isError = EpsonErrorKeywords.Any(k => fullContent.Contains(k, StringComparison.OrdinalIgnoreCase));
+                        bool isError = ContainsEpsonErrorKeyword(fullContent);
 
                         if (isError)
                         {
@@ -713,5 +733,24 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             // ignored
         }
         return (found, targetPid, foundTitle, foundContent);
+    }
+
+    internal static bool ContainsEpsonErrorKeyword(string content) =>
+        EpsonErrorKeywords.Any(keyword =>
+            content.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+
+    private static string ReadCrossProcessWindowText(IntPtr hWnd)
+    {
+        var text = new StringBuilder(2048);
+        IntPtr sendResult = SendMessageTimeout(
+            hWnd,
+            WmGetText,
+            (UIntPtr)text.Capacity,
+            text,
+            SendMessageTimeoutAbortIfHung,
+            200,
+            out _);
+
+        return sendResult == IntPtr.Zero ? string.Empty : text.ToString();
     }
 }

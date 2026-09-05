@@ -45,13 +45,15 @@ public class PrinterHealthMonitorTests
         private readonly int _detectedErrorState;
         private readonly int _extendedPrinterStatus;
         private readonly bool _isOffline;
+        private readonly string? _epsonPopupText;
 
         public WmiStatusMonitor(
             IOptions<HardwareSettings> hardwareOptions,
             IWorkerEventPipeClient eventPipe,
             int detectedErrorState = 0,
             int extendedPrinterStatus = 3,
-            bool isOffline = false)
+            bool isOffline = false,
+            string? epsonPopupText = null)
             : base(
                 NullLogger<PrinterHealthMonitor>.Instance,
                 hardwareOptions,
@@ -60,6 +62,7 @@ public class PrinterHealthMonitorTests
             _detectedErrorState = detectedErrorState;
             _extendedPrinterStatus = extendedPrinterStatus;
             _isOffline = isOffline;
+            _epsonPopupText = epsonPopupText;
         }
 
         protected override bool TryReadMonitorStatus(
@@ -73,6 +76,12 @@ public class PrinterHealthMonitorTests
             extendedPrinterStatus = _extendedPrinterStatus;
             return true;
         }
+
+        protected override (bool HasPopup, int ProcessId, string WindowTitle, string Content)
+            CheckEpsonStatusMonitorPopup(string printerName) =>
+            _epsonPopupText is null
+                ? (false, 0, string.Empty, string.Empty)
+                : (true, 123, "EPSON Status Monitor 3", _epsonPopupText);
 
         public Task MonitorOnceAsync(CancellationToken cancellationToken) =>
             MonitorPrinterAsync(cancellationToken);
@@ -216,6 +225,45 @@ public class PrinterHealthMonitorTests
         Assert.Equal("EPSON L5290 Series", printerError.PrinterName);
         Assert.Equal("hardware_error", printerError.FailureStage);
         Assert.Contains("No Paper", printerError.Message);
+    }
+
+    [Fact]
+    public async Task MonitorPrinterAsync_EpsonPopupError_EmitsPrinterError()
+    {
+        var capturedEvents = new List<WorkerPrintEvent>();
+        var eventPipe = new Mock<IWorkerEventPipeClient>();
+        eventPipe
+            .Setup(pipe => pipe.SendAsync(It.IsAny<WorkerPrintEvent>(), It.IsAny<CancellationToken>()))
+            .Callback<WorkerPrintEvent, CancellationToken>((evt, _) => capturedEvents.Add(evt))
+            .ReturnsAsync(true);
+
+        var monitor = new WmiStatusMonitor(
+            Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
+            eventPipe.Object,
+            epsonPopupText: "Paper is out. Load paper into the rear tray.");
+
+        await monitor.MonitorOnceAsync(CancellationToken.None);
+
+        var printerError = Assert.Single(capturedEvents);
+        Assert.Equal(WorkerPrintEventType.PrinterError, printerError.Type);
+        Assert.Equal("hardware_error", printerError.FailureStage);
+        Assert.Equal("99", printerError.ErrorCode);
+        Assert.Contains("Paper is out", printerError.Message);
+        Assert.True(monitor.HasFatalHardwareError(
+            "EPSON L5290 Series",
+            out var errorCode,
+            out var errorMessage));
+        Assert.Equal(99, errorCode);
+        Assert.Contains("Paper is out", errorMessage);
+    }
+
+    [Fact]
+    public void ContainsEpsonErrorKeyword_PaperOutDialog_ReturnsTrue()
+    {
+        const string popupContent =
+            "EPSON Status Monitor 3 : EPSON L5290 Series\nPaper out or incorrect loading";
+
+        Assert.True(PrinterHealthMonitor.ContainsEpsonErrorKeyword(popupContent));
     }
 
     [Fact]

@@ -17,7 +17,7 @@ public class CoinSimulationTests
     [Theory]
     [InlineData(true, false, true, true, null)]
     [InlineData(false, false, true, false, "SIMULATION_DISABLED")]
-    [InlineData(true, true, true, false, "slot_locked")]
+    [InlineData(true, true, true, true, null)]
     [InlineData(true, false, false, false, "WORKER_EVENT_UNAVAILABLE")]
     public async Task Command_RespectsGateAndReportsEventDelivery(
         bool enabled, bool locked, bool delivered, bool success, string? errorCode)
@@ -41,11 +41,12 @@ public class CoinSimulationTests
         using var response = JsonDocument.Parse(output.ToArray());
         Assert.Equal(success, response.RootElement.GetProperty("success").GetBoolean());
         Assert.Equal("scc-1", response.RootElement.GetProperty("requestId").GetString());
+        Assert.Equal("SimulateCoin", response.RootElement.GetProperty("type").GetString());
         Assert.Equal(errorCode, response.RootElement.GetProperty("errorCode").GetString());
         if (enabled)
         {
             var evt = Assert.Single(sent);
-            Assert.Equal(locked ? WorkerPrintEventType.CoinRejected : WorkerPrintEventType.CoinInserted, evt.Type);
+            Assert.Equal(WorkerPrintEventType.CoinInserted, evt.Type);
             Assert.True(evt.Simulated);
             Assert.Equal(5, evt.CoinValue);
             Assert.Equal("scc-1", evt.RequestId);
