@@ -15,6 +15,10 @@ public enum WorkerPrintEventType
     CoinRejected = 10,
     HopperProgress = 11,
     HopperDispensed = 12,
-    HardwareStatus = 13
+    HardwareStatus = 13,
+    ScanStarted = 14,
+    ScanProgress = 15,
+    ScanCompleted = 16,
+    ScanFailed = 17
 }
 

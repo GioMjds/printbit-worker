@@ -9,6 +9,7 @@ using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Infrastructure.Services.SerialService;
 using PrintBit.Infrastructure.Windows.PowerMonitoring;
 using PrintBit.Infrastructure.Windows.PrinterMonitoring;
+using PrintBit.Infrastructure.Windows.Scanning;
 using PrintBit.Shared.Configurations;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -22,6 +23,8 @@ builder.Services.Configure<PowerSettings>(builder.Configuration.GetSection("Powe
 builder.Services.Configure<PrinterRecoverySettings>(builder.Configuration.GetSection("PrinterRecoverySettings"));
 
 builder.Services.Configure<DocumentConversionSettings>(builder.Configuration.GetSection("DocumentConversionSettings"));
+
+builder.Services.Configure<ScannerSettings>(builder.Configuration.GetSection("ScannerSettings"));
 
 builder.Services.AddWindowsService(options =>
 {
@@ -68,6 +71,8 @@ builder.Services.AddSingleton<ICoinAcceptor, CoinAcceptorDevice>();
 builder.Services.AddSingleton<IHopper, HopperDevice>();
 builder.Services.AddSingleton<HardwareOrchestrator>();
 builder.Services.AddSingleton<IHardwareOrchestrator>(sp => sp.GetRequiredService<HardwareOrchestrator>());
+
+builder.Services.AddSingleton<IScannerService, Naps2ScannerService>();
 
 var host = builder.Build();
 

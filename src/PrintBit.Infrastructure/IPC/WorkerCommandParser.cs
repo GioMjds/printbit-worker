@@ -213,7 +213,11 @@ public static class WorkerCommandParser
                string.Equals(type, "DispenseCoins", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(type, "LockCoinSlot", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(type, "UnlockCoinSlot", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(type, "AnnounceKioskIp", StringComparison.OrdinalIgnoreCase);
+               string.Equals(type, "AnnounceKioskIp", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "GetScannerStatus", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "ProbeScanner", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "StartScan", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "CancelScan", StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool TryParseHardwareCommand(
@@ -398,6 +402,89 @@ public static class WorkerCommandParser
                     Ip = ipElem.GetString()!,
                     Port = port,
                     Path = pathElem.GetString()!
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "GetScannerStatus", StringComparison.OrdinalIgnoreCase))
+            {
+                command = new GetScannerStatusCommand { RequestId = requestId };
+                return true;
+            }
+            else if (string.Equals(commandType, "ProbeScanner", StringComparison.OrdinalIgnoreCase))
+            {
+                command = new ProbeScannerCommand { RequestId = requestId };
+                return true;
+            }
+            else if (string.Equals(commandType, "StartScan", StringComparison.OrdinalIgnoreCase))
+            {
+                var source = "flatbed";
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "source", out var srcElem) &&
+                    srcElem.ValueKind == JsonValueKind.String)
+                {
+                    source = srcElem.GetString() ?? "flatbed";
+                }
+
+                var dpi = 300;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "dpi", out var dpiElem) &&
+                    dpiElem.ValueKind == JsonValueKind.Number &&
+                    dpiElem.TryGetInt32(out var parsedDpi))
+                {
+                    dpi = parsedDpi;
+                }
+
+                var colorMode = "colored";
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "colorMode", out var colorElem) &&
+                    colorElem.ValueKind == JsonValueKind.String)
+                {
+                    colorMode = colorElem.GetString() ?? "colored";
+                }
+
+                var format = "pdf";
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "format", out var fmtElem) &&
+                    fmtElem.ValueKind == JsonValueKind.String)
+                {
+                    format = fmtElem.GetString() ?? "pdf";
+                }
+
+                string? paperSize = null;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "paperSize", out var paperElem) &&
+                    paperElem.ValueKind == JsonValueKind.String)
+                {
+                    paperSize = paperElem.GetString();
+                }
+
+                string? outputDir = null;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "outputDir", out var outElem) &&
+                    outElem.ValueKind == JsonValueKind.String)
+                {
+                    outputDir = outElem.GetString();
+                }
+
+                command = new StartScanCommand
+                {
+                    RequestId = requestId,
+                    Source = source,
+                    Dpi = dpi,
+                    ColorMode = colorMode,
+                    Format = format,
+                    PaperSize = paperSize,
+                    OutputDir = outputDir
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "CancelScan", StringComparison.OrdinalIgnoreCase))
+            {
+                var targetId = string.Empty;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "targetRequestId", out var targetElem) &&
+                    targetElem.ValueKind == JsonValueKind.String)
+                {
+                    targetId = targetElem.GetString() ?? string.Empty;
+                }
+
+                command = new CancelScanCommand
+                {
+                    RequestId = requestId,
+                    TargetRequestId = targetId
                 };
                 return true;
             }

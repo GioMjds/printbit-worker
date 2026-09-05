@@ -169,3 +169,113 @@ public sealed record HardwareCommandResponse
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Message { get; init; }
 }
+
+public sealed record GetScannerStatusCommand : WorkerHardwareCommand;
+
+public sealed record ProbeScannerCommand : WorkerHardwareCommand;
+
+public sealed record StartScanCommand : WorkerHardwareCommand
+{
+    [JsonPropertyName("source")]
+    public string Source { get; init; } = "flatbed";
+
+    [JsonPropertyName("dpi")]
+    public int Dpi { get; init; } = 300;
+
+    [JsonPropertyName("colorMode")]
+    public string ColorMode { get; init; } = "colored";
+
+    [JsonPropertyName("format")]
+    public string Format { get; init; } = "pdf";
+
+    [JsonPropertyName("paperSize")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PaperSize { get; init; }
+
+    [JsonPropertyName("outputDir")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OutputDir { get; init; }
+}
+
+public sealed record CancelScanCommand : WorkerHardwareCommand
+{
+    [JsonPropertyName("targetRequestId")]
+    public string TargetRequestId { get; init; } = string.Empty;
+}
+
+public sealed record ScannerStatusResponse
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; init; } = string.Empty;
+
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "ScannerStatus";
+
+    [JsonPropertyName("connected")]
+    public bool Connected { get; init; }
+
+    [JsonPropertyName("adapter")]
+    public string Adapter { get; init; } = "naps2";
+
+    [JsonPropertyName("driver")]
+    public string Driver { get; init; } = "none";
+
+    [JsonPropertyName("deviceName")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeviceName { get; init; }
+
+    [JsonPropertyName("capabilities")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public object? Capabilities { get; init; }
+
+    [JsonPropertyName("error")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
+}
+
+public sealed record StartScanResponse
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; init; } = string.Empty;
+
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "StartScan";
+
+    [JsonPropertyName("success")]
+    public bool Success { get; init; }
+
+    [JsonPropertyName("outputPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OutputPath { get; init; }
+
+    [JsonPropertyName("pageCount")]
+    public int PageCount { get; init; }
+
+    [JsonPropertyName("format")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Format { get; init; }
+
+    [JsonPropertyName("errorCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ErrorCode { get; init; }
+
+    [JsonPropertyName("message")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Message { get; init; }
+}
+
+public sealed record CancelScanResponse
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; init; } = string.Empty;
+
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "CancelScan";
+
+    [JsonPropertyName("success")]
+    public bool Success { get; init; }
+
+    [JsonPropertyName("message")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Message { get; init; }
+}

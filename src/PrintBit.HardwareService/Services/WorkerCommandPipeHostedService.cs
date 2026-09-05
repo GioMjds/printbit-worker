@@ -1,17 +1,12 @@
-using System;
 using System.Diagnostics;
-using System.IO;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PrintBit.Application.Services;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
+using PrintBit.Infrastructure.Windows.Scanning;
 using PrintBit.Shared.Configurations;
 
 namespace PrintBit.HardwareService.Services;
@@ -24,6 +19,7 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
     private readonly IHardwareOrchestrator? _hardwareOrchestrator;
     private readonly IWorkerEventPipeClient? _eventPipeClient;
     private readonly bool _enableCoinSimulation;
+    private readonly IScannerService? _scannerService;
 
     public WorkerCommandPipeHostedService(
         ILogger<WorkerCommandPipeHostedService> logger,
@@ -31,7 +27,8 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
         IOptions<IpcSettings> options,
         IHardwareOrchestrator? hardwareOrchestrator = null,
         IWorkerEventPipeClient? eventPipeClient = null,
-        IOptions<HardwareSettings>? hardwareSettings = null)
+        IOptions<HardwareSettings>? hardwareSettings = null,
+        IScannerService? scannerService = null)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _recoveryService = recoveryService ?? throw new ArgumentNullException(nameof(recoveryService));
@@ -39,6 +36,7 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
         _hardwareOrchestrator = hardwareOrchestrator;
         _eventPipeClient = eventPipeClient;
         _enableCoinSimulation = hardwareSettings?.Value.EnableCoinSimulation ?? false;
+        _scannerService = scannerService;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -329,8 +327,150 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                         };
                         hwResponseJson = JsonSerializer.Serialize(announceResponse, WorkerCommandParser.JsonOptions) + "\n";
                         break;
+                    case GetScannerStatusCommand getStatusCmd:
+                            if (_scannerService == null)
+                            {
+                                var unavail = new ScannerStatusResponse
+                                {
+                                    RequestId = getStatusCmd.RequestId,
+                                    Connected = false,
+                                    Error = "Scanner service not registered"
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(unavail, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            else
+                            {
+                                var status = await _scannerService.GetStatusAsync(cancellationToken);
+                                var statusResponse = new ScannerStatusResponse
+                                {
+                                    RequestId = getStatusCmd.RequestId,
+                                    Connected = status.Connected,
+                                    Adapter = status.Adapter,
+                                    Driver = status.Driver,
+                                    DeviceName = status.DeviceName,
+                                    Capabilities = status.Capabilities,
+                                    Error = status.LastError
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(statusResponse, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            break;
 
-                    default:
+                    case ProbeScannerCommand probeCmd:
+                            if (_scannerService == null)
+                            {
+                                var unavail = new ScannerStatusResponse
+                                {
+                                    RequestId = probeCmd.RequestId,
+                                    Connected = false,
+                                    Error = "Scanner service not registered"
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(unavail, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            else
+                            {
+                                var probedCaps = await _scannerService.ProbeCapabilitiesAsync(cancellationToken);
+                                var probeStatus = await _scannerService.GetStatusAsync(cancellationToken);
+                                var probeResponse = new ScannerStatusResponse
+                                {
+                                    RequestId = probeCmd.RequestId,
+                                    Connected = probeStatus.Connected,
+                                    Adapter = probeStatus.Adapter,
+                                    Driver = probeStatus.Driver,
+                                    DeviceName = probeStatus.DeviceName,
+                                    Capabilities = probedCaps,
+                                    Error = probeStatus.LastError
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(probeResponse, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            break;
+
+                    case StartScanCommand scanCmd:
+                            if (_scannerService == null)
+                            {
+                                var unavail = new StartScanResponse
+                                {
+                                    RequestId = scanCmd.RequestId,
+                                    Success = false,
+                                    ErrorCode = "SCANNER_UNAVAILABLE",
+                                    Message = "Scanner service not registered"
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(unavail, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            else
+                            {
+                                if (_eventPipeClient != null)
+                                {
+                                    await _eventPipeClient.SendAsync(new WorkerPrintEvent
+                                    {
+                                        Type = WorkerPrintEventType.ScanStarted,
+                                        RequestId = scanCmd.RequestId,
+                                        Message = $"Scan started ({scanCmd.Source}, {scanCmd.Dpi} DPI, {scanCmd.Format})"
+                                    }, cancellationToken);
+                                }
+
+                                var scanResult = await _scannerService.ExecuteScanAsync(new ScanRequest
+                                {
+                                    RequestId = scanCmd.RequestId,
+                                    Source = scanCmd.Source,
+                                    Dpi = scanCmd.Dpi,
+                                    ColorMode = scanCmd.ColorMode,
+                                    Format = scanCmd.Format,
+                                    PaperSize = scanCmd.PaperSize,
+                                    OutputDir = scanCmd.OutputDir
+                                }, cancellationToken);
+
+                                if (_eventPipeClient != null)
+                                {
+                                    await _eventPipeClient.SendAsync(new WorkerPrintEvent
+                                    {
+                                        Type = scanResult.Success ? WorkerPrintEventType.ScanCompleted : WorkerPrintEventType.ScanFailed,
+                                        RequestId = scanCmd.RequestId,
+                                        FileName = scanResult.OutputPath,
+                                        TotalPages = scanResult.PageCount,
+                                        ErrorCode = scanResult.ErrorCode,
+                                        Message = scanResult.ErrorMessage ?? (scanResult.Success ? "Scan completed successfully" : "Scan failed")
+                                    }, cancellationToken);
+                                }
+
+                                var startScanResponse = new StartScanResponse
+                                {
+                                    RequestId = scanCmd.RequestId,
+                                    Success = scanResult.Success,
+                                    OutputPath = scanResult.OutputPath,
+                                    PageCount = scanResult.PageCount,
+                                    Format = scanResult.Format,
+                                    ErrorCode = scanResult.ErrorCode,
+                                    Message = scanResult.ErrorMessage
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(startScanResponse, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            break;
+
+                    case CancelScanCommand cancelCmd:
+                            if (_scannerService == null)
+                            {
+                                var cancelResponse = new CancelScanResponse
+                                {
+                                    RequestId = cancelCmd.RequestId,
+                                    Success = false,
+                                    Message = "Scanner service not registered"
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(cancelResponse, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            else
+                            {
+                                var cancelled = await _scannerService.CancelScanAsync(cancelCmd.TargetRequestId);
+                                var cancelResponse = new CancelScanResponse
+                                {
+                                    RequestId = cancelCmd.RequestId,
+                                    Success = cancelled,
+                                    Message = cancelled ? "Scan cancellation requested" : "Scan not found or already completed"
+                                };
+                                hwResponseJson = JsonSerializer.Serialize(cancelResponse, WorkerCommandParser.JsonOptions) + "\n";
+                            }
+                            break;
+
+                        default:
                         var fallbackResponse = new HardwareErrorResponse
                         {
                             RequestId = hwCommand.RequestId,
