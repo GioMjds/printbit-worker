@@ -119,6 +119,104 @@ SumatraPDF.exe -print-to "<PrinterName>" -print-settings "<copies>" "<filePath>"
 
 ---
 
+## Kiosk Installation
+
+The supported installation flow has two parts. Run both from **PowerShell opened
+with Run as administrator**.
+
+### 1. Install the Node.js kiosk
+
+From the Node.js repository:
+
+```powershell
+pnpm run install-kiosk
+```
+
+That script owns the Node.js kiosk installation. Do not duplicate its startup or
+kiosk-shell setup from this repository.
+
+### 2. Publish and install the hardware worker
+
+From `C:\Users\printbit\printbit-worker`:
+
+```powershell
+dotnet publish .\src\PrintBit.HardwareService\PrintBit.HardwareService.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -p:PublishSingleFile=true `
+  -o .\publish
+
+$workerExe = (Resolve-Path '.\publish\PrintBit.HardwareService.exe').Path
+$workerBinPath = '"' + $workerExe + '"'
+$serviceCredential = Get-Credential "$env:COMPUTERNAME\printbit"
+$servicePassword = $serviceCredential.GetNetworkCredential().Password
+
+try {
+  sc.exe create PrintBitHardware `
+    binPath= $workerBinPath `
+    start= auto `
+    depend= Spooler `
+    obj= $serviceCredential.UserName `
+    password= $servicePassword `
+    DisplayName= "PrintBit Hardware Service"
+} finally {
+  $servicePassword = $null
+  $serviceCredential = $null
+}
+
+sc.exe start PrintBitHardware
+sc.exe queryex PrintBitHardware
+```
+
+The credential prompt must receive the Windows password for
+`desktop-jhtg0bm\printbit`. That account must have the **Log on as a service**
+right. Success means `sc.exe create` reports `CreateService SUCCESS` and the
+final query reaches `STATE: 4 RUNNING`.
+
+Always publish the worker `.csproj` directly. Publishing the solution with one
+shared `--output` directory can produce `NETSDK1194` and unnecessarily restores
+the test project.
+
+The `publish/` and `publish-kiosk/` directories are generated deployment output
+and are ignored by Git. A self-contained executable can exceed 100 MB; never add
+it to a commit. Recreate it on the kiosk with `dotnet publish`.
+
+### Updating an installed worker
+
+Do not run `sc.exe create` again. Stop the service, republish, and restart it:
+
+```powershell
+sc.exe stop PrintBitHardware
+# Wait until: sc.exe query PrintBitHardware reports STATE: 1 STOPPED
+
+dotnet publish .\src\PrintBit.HardwareService\PrintBit.HardwareService.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -p:PublishSingleFile=true `
+  -o .\publish
+
+sc.exe start PrintBitHardware
+sc.exe queryex PrintBitHardware
+```
+
+Common failures:
+
+| Error | Cause | Action |
+|---|---|---|
+| `NU1301` | NuGet is unreachable | Check internet, proxy, firewall, and NuGet source access. |
+| `NETSDK1194` | The solution was published into one output directory | Publish the worker `.csproj` with the command above. |
+| `OpenSCManager FAILED 5` | PowerShell is not elevated | Reopen PowerShell with Run as administrator. |
+| `FAILED 1060` | The service does not exist | Run the create command using the exact name `PrintBitHardware`. |
+| `FAILED 1073` | The service already exists | Use the update procedure instead. |
+| Start error `1069` | Password or service-logon right is invalid | Re-enter the `printbit` credential and verify Local Security Policy. |
+| Start error `1053` or `1067` | The worker exited during startup | Check the Application and System logs in Event Viewer. |
+
+References: [Microsoft .NET Windows Service installation](https://learn.microsoft.com/en-us/dotnet/core/extensions/windows-service),
+[`sc.exe create` syntax](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-create),
+and [solution-level `--output` restrictions](https://learn.microsoft.com/en-us/dotnet/core/compatibility/sdk/7.0/solution-level-output-no-longer-valid).
+
 ## Running Locally
 
 ```bash
@@ -127,15 +225,8 @@ cd src/PrintBit.HardwareService
 dotnet run
 ```
 
-### Install as Windows Service
-
-```bash
-dotnet publish -c Release -o ./publish
-sc create PrintBitHardware binPath="C:\path\to\publish\PrintBit.HardwareService.exe"
-sc start PrintBitHardware
-```
-
-The project references `Microsoft.Extensions.Hosting.WindowsServices` — the host automatically handles Windows SCM lifecycle signals.
+The project references `Microsoft.Extensions.Hosting.WindowsServices`, so the host
+automatically handles Windows Service Control Manager lifecycle signals.
 
 ---
 
