@@ -10,7 +10,7 @@ namespace PrintBit.HardwareService.Services;
 public class PrintQueueWatcher : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
-    private readonly System.Collections.Generic.HashSet<string> _processingFiles = [];
+    private readonly HashSet<string> _processingFiles = [];
     private readonly ILogger<PrintQueueWatcher> _logger;
     private readonly IJobOrchestrator _orchestrator;
     private readonly HardwareSettings _settings;
