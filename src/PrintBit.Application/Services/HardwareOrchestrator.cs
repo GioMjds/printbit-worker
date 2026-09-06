@@ -374,6 +374,10 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
             var trimmed = line.Trim();
             if (trimmed == "0" || trimmed == "1" || trimmed == "2" || trimmed == "5")
             {
+                _logger.LogInformation(
+                    "Coin pulse received: {PulseToken} (source: {Source})",
+                    trimmed,
+                    "serial");
                 _pulseDecoder.ProcessToken(trimmed);
             }
             else if (trimmed.StartsWith("COIN:", StringComparison.OrdinalIgnoreCase))
@@ -381,7 +385,22 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
                 var token = trimmed["COIN:".Length..].Trim();
                 if (!string.IsNullOrEmpty(token))
                 {
+                    _logger.LogInformation(
+                        "Coin pulse received: {PulseToken} (source: {Source})",
+                        token,
+                        "COIN");
                     _pulseDecoder.ProcessToken(token);
+                }
+            }
+            else if (trimmed.StartsWith("coin_pulse:", StringComparison.OrdinalIgnoreCase))
+            {
+                var denomination = trimmed["coin_pulse:".Length..].Trim();
+                if (!string.IsNullOrEmpty(denomination))
+                {
+                    _logger.LogInformation(
+                        "Coin pulse received: {PulseToken} (source: {Source})",
+                        denomination,
+                        "ESP32");
                 }
             }
         }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
@@ -115,6 +116,54 @@ public class HardwareOrchestratorTests
 
         Assert.Single(resolvedCoins);
         Assert.Equal(5, resolvedCoins[0]);
+    }
+
+    [Fact]
+    public void SerialLine_WithCoinPrefixToken_LogsTheReceivedPulse()
+    {
+        var stateMachine = new TransactionStateMachine(NullLogger<TransactionStateMachine>.Instance);
+        var printService = new OrchestratorFakePrintService();
+        var pipeServer = new FakeNamedPipeServer();
+        var serialMock = new Mock<ISerialConnection>();
+        var logger = new RecordingLogger<HardwareOrchestrator>();
+
+        using var sut = CreateSut(
+            stateMachine,
+            printService,
+            pipeServer,
+            serialMock: serialMock,
+            logger: logger);
+
+        serialMock.Raise(s => s.LineReceived += null, serialMock.Object, "COIN:5");
+
+        Assert.Contains(
+            logger.Entries,
+            entry => entry.Level == LogLevel.Information &&
+                     entry.Message == "Coin pulse received: 5 (source: COIN)");
+    }
+
+    [Fact]
+    public void SerialLine_WithEsp32CoinPulse_LogsTheResolvedDenomination()
+    {
+        var stateMachine = new TransactionStateMachine(NullLogger<TransactionStateMachine>.Instance);
+        var printService = new OrchestratorFakePrintService();
+        var pipeServer = new FakeNamedPipeServer();
+        var serialMock = new Mock<ISerialConnection>();
+        var logger = new RecordingLogger<HardwareOrchestrator>();
+
+        using var sut = CreateSut(
+            stateMachine,
+            printService,
+            pipeServer,
+            serialMock: serialMock,
+            logger: logger);
+
+        serialMock.Raise(s => s.LineReceived += null, serialMock.Object, "coin_pulse:10");
+
+        Assert.Contains(
+            logger.Entries,
+            entry => entry.Level == LogLevel.Information &&
+                     entry.Message == "Coin pulse received: 10 (source: ESP32)");
     }
 
     [Fact]
@@ -326,7 +375,8 @@ public class HardwareOrchestratorTests
         Mock<ICoinAcceptor>? coinAcceptorMock = null,
         Mock<IHopper>? hopperMock = null,
         CoinPulseDecoder? pulseDecoder = null,
-        Mock<IWorkerEventPipeClient>? eventPipeMock = null)
+        Mock<IWorkerEventPipeClient>? eventPipeMock = null,
+        ILogger<HardwareOrchestrator>? logger = null)
     {
         var startPrint = new StartPrintHandler(
             NullLogger<StartPrintHandler>.Instance,
@@ -339,7 +389,7 @@ public class HardwareOrchestratorTests
             stateMachine);
 
         return new HardwareOrchestrator(
-            NullLogger<HardwareOrchestrator>.Instance,
+            logger ?? NullLogger<HardwareOrchestrator>.Instance,
             coinHandler,
             startPrint,
             stateMachine,
@@ -350,6 +400,26 @@ public class HardwareOrchestratorTests
             hopperMock?.Object ?? new Mock<IHopper>().Object,
             pulseDecoder ?? new CoinPulseDecoder(),
             eventPipeMock?.Object);
+    }
+}
+
+public sealed class RecordingLogger<T> : ILogger<T>
+{
+    public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+    public IDisposable? BeginScope<TState>(TState state)
+        where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        Entries.Add((logLevel, formatter(state, exception)));
     }
 }
 
