@@ -65,19 +65,30 @@ public sealed class DocumentPrinter : IDocumentPrinter
                 return Failed(PrintFailureStage.Validation, "SumatraPDF executable not found", pages.Count);
             }
 
-            ApplyPrintQuality(printerName, settings.Quality);
+            string dispatchPrinterName;
+            try
+            {
+                dispatchPrinterName = PrinterProfileResolver.Resolve(
+                    _settings,
+                    settings.Quality);
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+            {
+                return Failed(PrintFailureStage.Validation, ex.Message, pages.Count);
+            }
 
             _logger.LogInformation(
-                "Dispatching whole PDF copy {copyNumber} from {filePath} to {printerName} ({pageCount} selected pages)",
+                "Dispatching whole PDF copy {copyNumber} from {filePath} to profile queue {dispatchPrinterName} for physical printer {printerName} ({pageCount} selected pages)",
                 copyNumber,
                 filePath,
+                dispatchPrinterName,
                 printerName,
                 pages.Count);
 
             using var process = BuildPrintProcess(
                 _settings.SumatraPath,
                 filePath,
-                printerName,
+                dispatchPrinterName,
                 pages,
                 settings);
 
@@ -113,6 +124,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
             }
 
             return await VerifySpoolerDocumentLifecycleAsync(
+                dispatchPrinterName,
                 printerName,
                 Path.GetFileName(filePath),
                 pages.Count,
@@ -167,7 +179,8 @@ public sealed class DocumentPrinter : IDocumentPrinter
     }
 
     private async Task<DocumentPrintResult> VerifySpoolerDocumentLifecycleAsync(
-        string printerName,
+        string dispatchPrinterName,
+        string physicalPrinterName,
         string documentName,
         int expectedPages,
         Func<int, int, Task> onProgress,
@@ -192,7 +205,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var (exists, statusMask, jobStatus, printed, total, jobId) =
-                    _healthMonitor.QueryJobStatus(printerName, documentName);
+                    _healthMonitor.QueryJobStatus(dispatchPrinterName, documentName);
 
                 if (exists)
                 {
@@ -207,7 +220,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
 
                     var jobHasError = (statusMask & JobErrorMask) != 0;
                     var fatalMonitorError = _healthMonitor.HasFatalHardwareError(
-                        printerName,
+                        physicalPrinterName,
                         out _,
                         out var fatalMessage);
                     var isDeleting = (statusMask & (0x4 | 0x100)) != 0 ||
@@ -268,7 +281,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
                             cancellationToken);
 
                         if (_healthMonitor.HasFatalHardwareError(
-                            printerName,
+                            physicalPrinterName,
                             out var code,
                             out var message))
                         {
@@ -292,7 +305,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
                             lastSpoolerJobId);
                     }
 
-                    if (_healthMonitor.IsHealthy(printerName, out _, out _))
+                    if (_healthMonitor.IsHealthy(physicalPrinterName, out _, out _))
                     {
                         return Completed(expectedPages, null);
                     }
@@ -306,7 +319,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
             if (lastSpoolerJobId is not null || observedActive)
             {
                 _healthMonitor.CancelMatchingJobs(
-                    printerName,
+                    dispatchPrinterName,
                     documentName,
                     lastSpoolerJobId);
             }
@@ -316,7 +329,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
         if (inPatienceMode)
         {
             _healthMonitor.CancelMatchingJobs(
-                printerName,
+                dispatchPrinterName,
                 documentName,
                 lastSpoolerJobId);
             return Cancelled(
@@ -333,29 +346,6 @@ public sealed class DocumentPrinter : IDocumentPrinter
             expectedPages,
             maxPagesPrinted,
             lastSpoolerJobId);
-    }
-
-    private void ApplyPrintQuality(string printerName, string quality)
-    {
-        if (!OperatingSystem.IsWindows()) return;
-
-        try
-        {
-            var applied = WinSpoolApi.SetPrinterQuality(printerName, quality);
-            _logger.LogInformation(
-                "Applied printer DEVMODE quality {quality} for {printerName} (success={applied})",
-                quality,
-                printerName,
-                applied);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                ex,
-                "Failed to set printer quality {quality} for {printerName}",
-                quality,
-                printerName);
-        }
     }
 
     private static string FormatPageSelection(IReadOnlyList<int> pages)

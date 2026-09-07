@@ -81,6 +81,10 @@ Cross-cutting types with no dependencies.
   "HardwareSettings": {
     "PrintTimeoutSeconds": 120,
     "PrinterName": "EPSON L5290 Series",
+    "PrinterProfiles": {
+      "Standard": "EPSON L5290 Series",
+      "High": "PrintBit - High"
+    },
     "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue"
   },
   "IpcSettings": {
@@ -94,7 +98,9 @@ Cross-cutting types with no dependencies.
 | Key | Default | Description |
 |---|---|---|
 | `PrintTimeoutSeconds` | `120` | Print timeout in seconds |
-| `PrinterName` | `EPSON L5290 Series` | Windows printer name |
+| `PrinterName` | `EPSON L5290 Series` | Physical printer identity used for health monitoring |
+| `PrinterProfiles.Standard` | `EPSON L5290 Series` | Logical queue for Standard jobs; falls back to `PrinterName` when omitted |
+| `PrinterProfiles.High` | `PrintBit - High` | Logical queue with system-wide Epson Printing Defaults saved as High; required for High jobs |
 | `PrintQueueDirectory` | `C:\\Users\\printbit\\printbit-worker\\queue` | Directory watched for PDFs |
 | `IpcSettings.PipeName` | `printbit-node-errors` | Named pipe for Node error messages |
 | `IpcSettings.MaxMessageBytes` | `8192` | Max bytes per error line |
@@ -104,16 +110,39 @@ Cross-cutting types with no dependencies.
 
 ## Print Pipeline
 
-`PrintService` dispatches to `SumatraPDF.exe`:
+`PrintService` resolves the job's `quality` (`standard` or `high`) to a fixed
+Windows logical queue, then dispatches to `SumatraPDF.exe`:
 
 ```
-SumatraPDF.exe -print-to "<PrinterName>" -print-settings "<copies>" "<filePath>"
+SumatraPDF.exe -print-to "<resolved profile queue>" -print-settings "<copies>" "<filePath>"
 ```
 
-- Printer: `EPSON L5290 Series`
+- Standard queue: `EPSON L5290 Series`
+- High queue: `PrintBit - High`
 - Concurrency: serialized via `SemaphoreSlim(1, 1)` — one job at a time
 - Timeout: 2 minutes via linked `CancellationTokenSource`
 - Exit code `!= 0` → `PrintJobResult { Success = false }`
+
+Both queues point to the same physical Epson and still share the worker's one global
+print lock. Configure each queue's paper type and quality in its system-wide
+**Printing Defaults** (Printer properties > Advanced), then verify the effective
+settings from the Windows identity that runs the worker. The worker does not mutate
+global driver preferences per job, and SumatraPDF has no dedicated Epson
+Standard/High command-line option.
+
+To create the High logical queue after confirming the installed driver and port:
+
+```powershell
+Get-Printer | Where-Object Name -like "*L5290*" | Format-List Name,DriverName,PortName
+Add-Printer -Name "PrintBit - High" -DriverName "EPSON L5290 Series" -PortName "USB001"
+```
+
+Replace the example driver and port with the exact values returned on the kiosk,
+then manually save **High** in that queue's Printing Defaults and verify it with
+the same PDF used for the Standard queue. See Microsoft's
+[`Add-Printer`](https://learn.microsoft.com/en-us/powershell/module/printmanagement/add-printer)
+documentation and SumatraPDF's
+[command-line reference](https://www.sumatrapdfreader.org/docs/Command-line-arguments).
 
 `SumatraPDF.exe` must be on `PATH` or in the working directory.
 
@@ -149,30 +178,22 @@ dotnet publish .\src\PrintBit.HardwareService\PrintBit.HardwareService.csproj `
 
 $workerExe = (Resolve-Path '.\publish\PrintBit.HardwareService.exe').Path
 $workerBinPath = '"' + $workerExe + '"'
-$serviceCredential = Get-Credential "$env:COMPUTERNAME\printbit"
-$servicePassword = $serviceCredential.GetNetworkCredential().Password
-
-try {
-  sc.exe create PrintBitHardware `
-    binPath= $workerBinPath `
-    start= auto `
-    depend= Spooler `
-    obj= $serviceCredential.UserName `
-    password= $servicePassword `
-    DisplayName= "PrintBit Hardware Service"
-} finally {
-  $servicePassword = $null
-  $serviceCredential = $null
-}
+sc.exe create PrintBitHardware `
+  binPath= $workerBinPath `
+  start= auto `
+  depend= Spooler `
+  obj= LocalSystem `
+  DisplayName= "PrintBit Hardware Service"
 
 sc.exe start PrintBitHardware
 sc.exe queryex PrintBitHardware
 ```
 
-The credential prompt must receive the Windows password for
-`desktop-jhtg0bm\printbit`. That account must have the **Log on as a service**
-right. Success means `sc.exe create` reports `CreateService SUCCESS` and the
-final query reaches `STATE: 4 RUNNING`.
+The worker runs as the built-in `LocalSystem` account, so installation does not
+depend on a kiosk-user password or the **Log on as a service** right. `SYSTEM`
+must retain access to the configured queue, failed, and executable paths.
+Success means `sc.exe create` reports `CreateService SUCCESS` and the final
+query reaches `STATE: 4 RUNNING`.
 
 Always publish the worker `.csproj` directly. Publishing the solution with one
 shared `--output` directory can produce `NETSDK1194` and unnecessarily restores
@@ -210,7 +231,7 @@ Common failures:
 | `OpenSCManager FAILED 5` | PowerShell is not elevated | Reopen PowerShell with Run as administrator. |
 | `FAILED 1060` | The service does not exist | Run the create command using the exact name `PrintBitHardware`. |
 | `FAILED 1073` | The service already exists | Use the update procedure instead. |
-| Start error `1069` | Password or service-logon right is invalid | Re-enter the `printbit` credential and verify Local Security Policy. |
+| Start error `1069` | A stale per-user service credential remains configured | Run `sc.exe config PrintBitHardware obj= LocalSystem password= ""`, then start the service again. |
 | Start error `1053` or `1067` | The worker exited during startup | Check the Application and System logs in Event Viewer. |
 
 References: [Microsoft .NET Windows Service installation](https://learn.microsoft.com/en-us/dotnet/core/extensions/windows-service),

@@ -117,12 +117,13 @@ SumatraPDF.exe -print-to "<printerName>" -print-settings "1x,<color|monochrome>,
 
 Critical constraints:
 - `SumatraPDF.exe` path comes from `HardwareSettings.SumatraPath` (default `C:\Users\printbit\bin\SumatraPDF.exe`).
-- Printer name comes from `HardwareSettings.PrinterName` and must exactly match Windows registration.
+- The physical printer identity comes from `HardwareSettings.PrinterName`; it is used for health monitoring and must exactly match Windows registration.
+- The dispatch queue comes from `HardwareSettings.PrinterProfiles`: Standard uses `Standard` (falling back to `PrinterName`), while High requires `High` to be configured.
 - Each copy is a separate spooler job; pages within a copy are not split into derivative PDFs.
 - Page ranges, color, orientation, and collation are passed through Sumatra's `-print-settings` argument.
 - Print jobs are serialized via `SemaphoreSlim(1, 1)` inside `DocumentPrinter`.
 - Before each copy, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy` to return true.
-- Before dispatching Sumatra, `DocumentPrinter` applies the print quality setting (`"high"` -> `DMRES_HIGH` / `-4`, `"standard"` -> `DMRES_MEDIUM` / `-3`) to the printer's `DEVMODE` via WinSpool API `SetPrinter`.
+- Print quality is supplied by fixed Windows logical queues whose system-wide Epson Printing Defaults are preconfigured as Standard or High. `DocumentPrinter` does not mutate global `DEVMODE` settings per job.
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
 - Spooler verification inspects `Win32_PrintJob.StatusMask` for error, offline, paper-out, blocked-queue, and user-intervention flags, and checks `PrinterHealthMonitor` for fatal hardware errors.
@@ -236,20 +237,19 @@ The administrative Node.js service must satisfy the following operational contra
 
 ### Cross-Windows-Identity DACL
 
-The kiosk runs the C# worker as `desktop-jhtg0bm\printbit` and the Node
-service from an Administrator PowerShell as `desktop-jhtg0bm\admin`. The
-default DACL of a named pipe excludes other interactive users, so a
-client running as `printbit` would get `UnauthorizedAccessException`
-when connecting to a pipe created by `admin`.
+The kiosk runs the C# worker as `LocalSystem` and the Node service from an
+Administrator PowerShell as `desktop-jhtg0bm\admin`. The worker needs no
+per-user password or interactive sign-in, which keeps it available while
+Windows Assigned Access restricts the kiosk account.
 
 - **Node return pipe** (`printbit-worker-events`): the server binds with
   `readableAll: true, writableAll: true` (libuv `uv_pipe_chmod`), which
   sets a permissive DACL. This is the only DACL knob Node's `net` API
   exposes; see
   `src/services/worker-return-pipe.ts` `server.listen({ ... })`.
-- **C# error pipe** (`printbit-node-errors`): the C# `printbit` user is
-  not in the `BUILTIN\Administrators` group, but the Node `admin` user
-  is. The default DACL on a `printbit`-created pipe already grants
+- **C# error pipe** (`printbit-node-errors`): the C# worker runs as
+  `LocalSystem`, while the Node `admin` user is in
+  `BUILTIN\Administrators`. The default DACL on a system-created pipe grants
   `Administrators` access, so the `admin` client can connect without
   any code change. `.NET 10`'s `NamedPipeServerStream` no longer
   exposes a public `PipeSecurity` constructor, so a more restrictive
@@ -262,8 +262,9 @@ when connecting to a pipe created by `admin`.
   excludes `WorldSid` (Everyone) and `AuthenticatedUserSid` so unprivileged kiosk
   identities cannot trigger recovery or query internal diagnostics.
 
-If the kiosk is re-deployed with the two processes under the same
-identity, both fixes become inert (the default DACL is sufficient).
+If the kiosk is re-deployed with the two processes under the same identity,
+the cross-identity DACL considerations become inert (the default DACL is
+sufficient).
 
 ---
 
@@ -289,7 +290,8 @@ Dependency direction:
 | `PrintQueueWatcher` | HardwareService | Watches queue directory, delegates to `IJobOrchestrator`, and cleans up sidecar files |
 | `ErrorPipeHostedService` | HardwareService | Reads Node.js error messages from named pipe and logs them |
 | `PrinterHealthMonitor` | Infrastructure.Windows | Background service and unified monitor for printer status, Epson popup checks, offline status, and read-only typed health diagnostics (`GetDiagnostic`) |
-| `DocumentPrinter` | Infrastructure | Original-PDF Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
+| `DocumentPrinter` | Infrastructure | Quality-profile Sumatra dispatch and spooler verification for one whole-document copy, with progress telemetry, patience mode, post-clear guard, and print lock |
+| `PrinterProfileResolver` | Infrastructure | Strictly maps `standard` and `high` job values to configured logical printer queues; High fails validation when its profile is absent |
 | `IPrinterRecoveryService` / `PrinterRecoveryService` | Infrastructure / Infrastructure.Windows | Printer recovery service orchestrating typed diagnostics, physical fault avoidance, and bounded native Spooler restart |
 | `IPrintSpoolerController` / `ServiceControllerSpoolerController` | Infrastructure.Windows | Native Windows ServiceController implementation managing Spooler service status and clean restarts |
 | `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; registered as singleton `PrintOperationCoordinator` in `Program.cs` |
@@ -365,6 +367,10 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "Esp32BaudRate": 115200,
     "PrintTimeoutSeconds": 120,
     "PrinterName": "EPSON L5290 Series",
+    "PrinterProfiles": {
+      "Standard": "EPSON L5290 Series",
+      "High": "PrintBit - High"
+    },
     "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue",
     "FailedDirectory": "C:\\Users\\printbit\\printbit-worker\\failed",
     "SumatraPath": "C:\\Users\\printbit\\bin\\SumatraPDF.exe",
@@ -538,6 +544,8 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 
 - Sumatra cold-start may take 15-30 seconds.
 - Exact printer-name matching is required.
+- Standard and High are separate logical queues for the same physical printer. Quality comes from each queue's saved system-wide Epson Printing Defaults, not a Sumatra option or a generic DPI/`DEVMODE` mapping.
+- Spooler tracking and cancellation use the selected logical queue; physical health checks continue to use `HardwareSettings.PrinterName`.
 - The original PDF is submitted once per requested copy; pages are not split into separate files.
 - Page range, color, orientation, and collation are passed directly to SumatraPDF.
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)` in `DocumentPrinter`).

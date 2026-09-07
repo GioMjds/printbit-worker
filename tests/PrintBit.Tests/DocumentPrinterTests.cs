@@ -256,18 +256,124 @@ public class DocumentPrinterTests
         }
     }
 
+    [Fact]
+    public async Task PrintDocumentAsync_HighQuality_UsesHighQueueForSpoolerTracking()
+    {
+        var dummyExe = GetDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var queriedPrinters = new List<string>();
+            var healthMock = new Mock<IPrinterHealthMonitor>();
+            var pollCount = 0;
+            healthMock.Setup(h => h.QueryJobStatus(It.IsAny<string>(), It.IsAny<string>()))
+                .Callback<string, string>((name, _) => queriedPrinters.Add(name))
+                .Returns(() => ++pollCount == 1
+                    ? (true, 0x10u, "Printing", 1, 1, "123")
+                    : (false, 0u, string.Empty, 0, 0, null));
+
+            var errorCode = 0;
+            var errorMessage = string.Empty;
+            healthMock.Setup(h => h.HasFatalHardwareError(
+                    "EPSON L5290 Series",
+                    out errorCode,
+                    out errorMessage))
+                .Returns(false);
+
+            var sut = CreateSut(
+                new HardwareSettings
+                {
+                    SumatraPath = dummyExe,
+                    PrintTimeoutSeconds = 5,
+                    PostClearGuardDelaySeconds = 0,
+                    PrinterName = "EPSON L5290 Series",
+                    PrinterProfiles = new PrinterProfileSettings
+                    {
+                        High = "PrintBit - High"
+                    }
+                },
+                healthMock.Object);
+
+            var result = await sut.PrintDocumentAsync(
+                tempPdf,
+                "EPSON L5290 Series",
+                1,
+                [1],
+                new PrintJobSettings { Quality = "high" },
+                (_, _) => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
+                CancellationToken.None);
+
+            Assert.Equal(PagePrintState.Completed, result.State);
+            Assert.NotEmpty(queriedPrinters);
+            Assert.All(queriedPrinters, name => Assert.Equal("PrintBit - High", name));
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
+    [Fact]
+    public async Task PrintDocumentAsync_HighQualityWithoutProfile_ReturnsValidationFailure()
+    {
+        var dummyExe = GetDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var sut = CreateSut(
+                new HardwareSettings
+                {
+                    SumatraPath = dummyExe,
+                    PrinterName = "EPSON L5290 Series"
+                },
+                Mock.Of<IPrinterHealthMonitor>());
+
+            var result = await sut.PrintDocumentAsync(
+                tempPdf,
+                "EPSON L5290 Series",
+                1,
+                [1],
+                new PrintJobSettings { Quality = "high" },
+                (_, _) => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
+                CancellationToken.None);
+
+            Assert.Equal(PagePrintState.Failed, result.State);
+            Assert.Equal(PrintFailureStage.Validation, result.FailureStage);
+            Assert.Contains("High-quality printer profile", result.ErrorMessage);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
     private static DocumentPrinter CreateSut(string sumatraPath, IPrinterHealthMonitor healthMonitor)
     {
-        return new DocumentPrinter(
-            NullLogger<DocumentPrinter>.Instance,
-            Options.Create(new HardwareSettings
+        return CreateSut(
+            new HardwareSettings
             {
                 SumatraPath = sumatraPath,
                 PrintTimeoutSeconds = 5,
                 PostClearGuardDelaySeconds = 0
-            }),
+            },
             healthMonitor);
     }
+
+    private static DocumentPrinter CreateSut(
+        HardwareSettings settings,
+        IPrinterHealthMonitor healthMonitor) =>
+        new(
+            NullLogger<DocumentPrinter>.Instance,
+            Options.Create(settings),
+            healthMonitor);
 
     private static string GetDummyExecutablePath()
     {

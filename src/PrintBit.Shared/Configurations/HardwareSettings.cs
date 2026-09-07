@@ -12,6 +12,8 @@ public class HardwareSettings
 
     public string PrinterName { get; set; } = "EPSON L5290 Series";
 
+    public PrinterProfileSettings PrinterProfiles { get; set; } = new();
+
     // Default queue path is a relative "queue" directory. The watcher resolves
     // it via Path.GetFullPath and creates it on startup if missing, so the same
     // value works in dev and in production. Override in appsettings.json or
