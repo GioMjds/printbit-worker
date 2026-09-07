@@ -175,7 +175,10 @@ Critical constraints:
 Printer monitor events use the same line-delimited JSON pipe. `PrinterError`
 carries `failureStage = "hardware_error"` and a human-readable `message`
 describing the detected error code. `PrinterOffline` / `PrinterOnline` are
-emitted on the WMI `WorkOffline` state change.
+emitted on the WMI `WorkOffline` state change. `PrinterOnline` is also emitted
+when a previously reported hardware error clears while the configured printer
+queue remains present, so Node can leave its error projection without a USB
+replug.
 
 ### Named Pipe (Node -> Service Command Pipe)
 

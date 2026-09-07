@@ -42,10 +42,10 @@ public class PrinterHealthMonitorTests
 
     private sealed class WmiStatusMonitor : PrinterHealthMonitor
     {
-        private readonly int _detectedErrorState;
-        private readonly int _extendedPrinterStatus;
-        private readonly bool _isOffline;
-        private readonly string? _epsonPopupText;
+        public int DetectedErrorState { get; set; }
+        public int ExtendedPrinterStatus { get; set; }
+        public bool IsOffline { get; set; }
+        public string? EpsonPopupText { get; set; }
 
         public WmiStatusMonitor(
             IOptions<HardwareSettings> hardwareOptions,
@@ -59,10 +59,10 @@ public class PrinterHealthMonitorTests
                 hardwareOptions,
                 eventPipe)
         {
-            _detectedErrorState = detectedErrorState;
-            _extendedPrinterStatus = extendedPrinterStatus;
-            _isOffline = isOffline;
-            _epsonPopupText = epsonPopupText;
+            DetectedErrorState = detectedErrorState;
+            ExtendedPrinterStatus = extendedPrinterStatus;
+            IsOffline = isOffline;
+            EpsonPopupText = epsonPopupText;
         }
 
         protected override bool TryReadMonitorStatus(
@@ -71,17 +71,17 @@ public class PrinterHealthMonitorTests
             out int detectedErrorState,
             out int extendedPrinterStatus)
         {
-            isOffline = _isOffline;
-            detectedErrorState = _detectedErrorState;
-            extendedPrinterStatus = _extendedPrinterStatus;
+            isOffline = IsOffline;
+            detectedErrorState = DetectedErrorState;
+            extendedPrinterStatus = ExtendedPrinterStatus;
             return true;
         }
 
         protected override (bool HasPopup, int ProcessId, string WindowTitle, string Content)
             CheckEpsonStatusMonitorPopup(string printerName) =>
-            _epsonPopupText is null
+            EpsonPopupText is null
                 ? (false, 0, string.Empty, string.Empty)
-                : (true, 123, "EPSON Status Monitor 3", _epsonPopupText);
+                : (true, 123, "EPSON Status Monitor 3", EpsonPopupText);
 
         public Task MonitorOnceAsync(CancellationToken cancellationToken) =>
             MonitorPrinterAsync(cancellationToken);
@@ -494,5 +494,32 @@ public class PrinterHealthMonitorTests
         Assert.Equal(WorkerPrintEventType.PrinterStatusSnapshot, snapshot.Type);
         Assert.Equal("EPSON L5290 Series", snapshot.PrinterName);
         Assert.Equal("Printer is online", snapshot.Message);
+    }
+
+    [Fact]
+    public async Task MonitorPrinterAsync_WhenHardwareErrorClears_BroadcastsHealthyPrinterEvent()
+    {
+        var capturedEvents = new List<WorkerPrintEvent>();
+        var eventPipe = new Mock<IWorkerEventPipeClient>();
+        eventPipe
+            .Setup(pipe => pipe.SendAsync(It.IsAny<WorkerPrintEvent>(), It.IsAny<CancellationToken>()))
+            .Callback<WorkerPrintEvent, CancellationToken>((evt, _) => capturedEvents.Add(evt))
+            .ReturnsAsync(true);
+
+        var monitor = new WmiStatusMonitor(
+            Options.Create(new HardwareSettings { PrinterName = "EPSON L5290 Series" }),
+            eventPipe.Object,
+            detectedErrorState: 4,
+            isOffline: false);
+
+        await monitor.MonitorOnceAsync(CancellationToken.None);
+        Assert.Equal(WorkerPrintEventType.PrinterError, Assert.Single(capturedEvents).Type);
+
+        monitor.DetectedErrorState = 0;
+        await monitor.MonitorOnceAsync(CancellationToken.None);
+
+        Assert.Equal(2, capturedEvents.Count);
+        Assert.Equal(WorkerPrintEventType.PrinterOnline, capturedEvents[1].Type);
+        Assert.Equal("Printer is online", capturedEvents[1].Message);
     }
 }

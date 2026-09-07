@@ -503,9 +503,20 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                 }
                 else
                 {
+                    var recoveredFromError = _lastErrorState is not null || _fatalErrorCode != 0;
                     _fatalErrorCode = 0;
                     _fatalErrorMessage = string.Empty;
                     _lastErrorState = null;
+
+                    if (recoveredFromError)
+                    {
+                        _pendingEvent = new WorkerPrintEvent
+                        {
+                            Type = WorkerPrintEventType.PrinterOnline,
+                            PrinterName = _hardwareSettings.PrinterName,
+                            Message = "Printer is online"
+                        };
+                    }
                 }
             }
         }
