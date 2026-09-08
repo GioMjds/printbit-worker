@@ -63,9 +63,19 @@ public class PrintQueueWatcher : BackgroundService
                             continue;
                         }
 
-                        _logger.LogInformation("Detected print job: {pdfFile}", pdfFile);
                         var jsonContent = await File.ReadAllTextAsync(jsonFile, stoppingToken);
                         var printSettings = JsonSerializer.Deserialize<PrintJobSettings>(jsonContent, JsonOptions) ?? new PrintJobSettings();
+
+                        _logger.LogInformation(
+                            "Detected print job: {pdfFile} | Copies={copies}, Color={color}, Orientation={orientation}, Quality={quality}, PaperSize={paperSize}, PageRange={pageRange}, RotationDeg={rotationDeg}",
+                            pdfFile,
+                            printSettings.Copies,
+                            printSettings.Color,
+                            printSettings.Orientation,
+                            printSettings.Quality,
+                            printSettings.PaperSize,
+                            printSettings.PageRange,
+                            printSettings.RotationDeg);
 
                         var request = new PrintJobRequest
                         {

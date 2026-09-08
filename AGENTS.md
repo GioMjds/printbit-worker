@@ -112,15 +112,15 @@ Defined in `Esp32Command`:
 `DocumentPrinter` submits the original PDF once per requested copy:
 
 ```
-SumatraPDF.exe -print-to "<printerName>" -print-settings "1x,<color|monochrome>,<pages>[,<orientation>],collate" -silent "<filePath>"
+SumatraPDF.exe -print-to "<printerName>" -print-settings "1x,<color|monochrome>,<pages>[,rotate=<degrees>],paper=<size>,fit,ignore-pdf-print-settings,collate" -silent "<filePath>"
 ```
 
 Critical constraints:
 - `SumatraPDF.exe` path comes from `HardwareSettings.SumatraPath` (default `C:\Users\printbit\bin\SumatraPDF.exe`).
 - The physical printer identity comes from `HardwareSettings.PrinterName`; it is used for health monitoring and must exactly match Windows registration.
-- The dispatch queue comes from `HardwareSettings.PrinterProfiles`: Standard uses `Standard` (falling back to `PrinterName`), while High requires `High` to be configured.
+- The dispatch queue comes from `HardwareSettings.PrinterProfiles`: quality and orientation select `Standard`, `StandardLandscape`, `High`, or `HighLandscape`; Standard portrait falls back to `PrinterName`.
 - Each copy is a separate spooler job; pages within a copy are not split into derivative PDFs.
-- Page ranges, color, orientation, and collation are passed through Sumatra's `-print-settings` argument.
+- Page ranges, color, explicit content rotation, paper size, fitting, and collation are passed through Sumatra's `-print-settings` argument. Paper orientation comes from the selected queue's Epson defaults, with Sumatra auto-rotation enabled to fit PDF content to that paper.
 - Print jobs are serialized via `SemaphoreSlim(1, 1)` inside `DocumentPrinter`.
 - Before each copy, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy` to return true.
 - Print quality is supplied by fixed Windows logical queues whose system-wide Epson Printing Defaults are preconfigured as Standard or High. `DocumentPrinter` does not mutate global `DEVMODE` settings per job.
@@ -302,7 +302,7 @@ Dependency direction:
 | `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for creating secure Windows ACLs granting admin/system-only access to the command pipe |
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
 | `JobOrchestrator` | Infrastructure | Counts and selects pages, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
-| `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation) |
+| `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation, rotation, paper size) |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
 printer-only mode. The DI container hosts background services (`PrintQueueWatcher`,
@@ -372,7 +372,9 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "PrinterName": "EPSON L5290 Series",
     "PrinterProfiles": {
       "Standard": "EPSON L5290 Series",
-      "High": "PrintBit - High"
+      "High": "PrintBit - High",
+      "StandardLandscape": "PrintBit - Landscape",
+      "HighLandscape": "PrintBit - High - Landscape"
     },
     "PrintQueueDirectory": "C:\\Users\\printbit\\printbit-worker\\queue",
     "FailedDirectory": "C:\\Users\\printbit\\printbit-worker\\failed",
@@ -547,10 +549,10 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 
 - Sumatra cold-start may take 15-30 seconds.
 - Exact printer-name matching is required.
-- Standard and High are separate logical queues for the same physical printer. Quality comes from each queue's saved system-wide Epson Printing Defaults, not a Sumatra option or a generic DPI/`DEVMODE` mapping.
+- Standard/High and portrait/landscape combinations use four logical queues for the same physical printer. Quality and paper orientation come from each queue's saved system-wide Epson Printing Defaults, not Sumatra content-orientation options or a generic DPI/`DEVMODE` mapping.
 - Spooler tracking and cancellation use the selected logical queue; physical health checks continue to use `HardwareSettings.PrinterName`.
 - The original PDF is submitted once per requested copy; pages are not split into separate files.
-- Page range, color, orientation, and collation are passed directly to SumatraPDF.
+- Page range, color, explicit content rotation, paper size, fitting, and collation are passed directly to SumatraPDF. Orientation selects the logical queue, and Sumatra auto-rotation remains enabled so content fits the queue's paper orientation.
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)` in `DocumentPrinter`).
 - Success requires both process success and spooler lifecycle verification.
 - Spooler verification checks `Win32_PrintJob.StatusMask` for error, offline, paper-out, blocked-queue, and user-intervention flags and checks `PrinterHealthMonitor` for fatal hardware errors. Hardware errors return `PrintFailureStage.HardwareError` without triggering spooler recovery.

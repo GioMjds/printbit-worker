@@ -7,4 +7,6 @@ public class PrintJobSettings
     public string Quality { get; set; } = "standard";
     public string? PageRange { get; set; }
     public string? Orientation { get; set; }
+    public int RotationDeg { get; set; }
+    public string PaperSize { get; set; } = "A4";
 }

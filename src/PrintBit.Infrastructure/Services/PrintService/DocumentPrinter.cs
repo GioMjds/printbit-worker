@@ -70,7 +70,8 @@ public sealed class DocumentPrinter : IDocumentPrinter
             {
                 dispatchPrinterName = PrinterProfileResolver.Resolve(
                     _settings,
-                    settings.Quality);
+                    settings.Quality,
+                    settings.Orientation);
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
             {
@@ -78,11 +79,14 @@ public sealed class DocumentPrinter : IDocumentPrinter
             }
 
             _logger.LogInformation(
-                "Dispatching whole PDF copy {copyNumber} from {filePath} to profile queue {dispatchPrinterName} for physical printer {printerName} ({pageCount} selected pages)",
+                "Dispatching whole PDF copy {copyNumber} from {filePath} to profile queue {dispatchPrinterName} for physical printer {printerName} (Quality={quality}, Orientation={orientation}, PaperSize={paperSize}, Pages={pageCount})",
                 copyNumber,
                 filePath,
                 dispatchPrinterName,
                 printerName,
+                settings.Quality,
+                settings.Orientation,
+                settings.PaperSize,
                 pages.Count);
 
             using var process = BuildPrintProcess(
@@ -91,6 +95,11 @@ public sealed class DocumentPrinter : IDocumentPrinter
                 dispatchPrinterName,
                 pages,
                 settings);
+
+            _logger.LogInformation(
+                "Executing SumatraPDF: {fileName} {arguments}",
+                process.StartInfo.FileName,
+                string.Join(" ", process.StartInfo.ArgumentList));
 
             try
             {
@@ -117,9 +126,15 @@ public sealed class DocumentPrinter : IDocumentPrinter
                 return Failed(PrintFailureStage.Timeout, "Sumatra process timeout", pages.Count);
             }
 
+            _logger.LogInformation(
+                "SumatraPDF exited with code {exitCode} for copy {copyNumber}",
+                process.ExitCode,
+                copyNumber);
+
             if (process.ExitCode != 0)
             {
                 var error = await process.StandardError.ReadToEndAsync(cancellationToken);
+                _logger.LogWarning("SumatraPDF error output: {error}", error);
                 return Failed(PrintFailureStage.ProcessExit, error, pages.Count);
             }
 
@@ -153,11 +168,14 @@ public sealed class DocumentPrinter : IDocumentPrinter
             FormatPageSelection(pages)
         };
 
-        if (settings.Orientation is "portrait" or "landscape")
+        if (settings.RotationDeg is 90 or 180 or 270)
         {
-            printSettings.Add(settings.Orientation);
+            printSettings.Add($"rotate={settings.RotationDeg}");
         }
 
+        printSettings.Add($"paper={NormalizePaperSize(settings.PaperSize)}");
+        printSettings.Add("fit");
+        printSettings.Add("ignore-pdf-print-settings");
         printSettings.Add("collate");
 
         var startInfo = new ProcessStartInfo
@@ -177,6 +195,14 @@ public sealed class DocumentPrinter : IDocumentPrinter
 
         return new Process { StartInfo = startInfo };
     }
+
+    private static string NormalizePaperSize(string? paperSize) =>
+        paperSize?.Trim().ToLowerInvariant() switch
+        {
+            "letter" => "letter",
+            "legal" => "legal",
+            _ => "A4"
+        };
 
     private async Task<DocumentPrintResult> VerifySpoolerDocumentLifecycleAsync(
         string dispatchPrinterName,

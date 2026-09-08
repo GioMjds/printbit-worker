@@ -20,14 +20,18 @@ public class DocumentPrinterTests
             new PrintJobSettings
             {
                 Color = true,
-                Orientation = "landscape"
+                Orientation = "landscape",
+                RotationDeg = 90,
+                PaperSize = "Legal"
             });
 
         var args = process.StartInfo.ArgumentList;
         Assert.Equal("-print-to", args[0]);
         Assert.Equal("EPSON L5290 Series", args[1]);
         Assert.Equal("-print-settings", args[2]);
-        Assert.Equal("1x,color,1-3,landscape,collate", args[3]);
+        Assert.Equal(
+            "1x,color,1-3,rotate=90,paper=legal,fit,ignore-pdf-print-settings,collate",
+            args[3]);
         Assert.Equal("-silent", args[4]);
         Assert.Equal(@"C:\PrintBit\job.pdf", args[5]);
     }
