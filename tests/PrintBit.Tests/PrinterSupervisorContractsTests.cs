@@ -25,6 +25,23 @@ public class PrinterSupervisorContractsTests
     }
 
     [Fact]
+    public void Snapshot_NormalizesLocalTimestampToUtc()
+    {
+        var localTimestamp = new DateTime(2026, 9, 9, 14, 26, 12, DateTimeKind.Local);
+        var value = PrinterSupervisorSnapshot.Ready(
+            8,
+            localTimestamp,
+            "EPSON L5290 Series",
+            "USB005");
+
+        var json = JsonSerializer.Serialize(value, WorkerJson.Options);
+        using var document = JsonDocument.Parse(json);
+
+        Assert.Equal(localTimestamp.ToUniversalTime(), value.TimestampUtc);
+        Assert.EndsWith("Z", document.RootElement.GetProperty("timestampUtc").GetString());
+    }
+
+    [Fact]
     public void Settings_DefaultsMatchApprovedPolicy()
     {
         var value = new PrinterRecoverySettings();

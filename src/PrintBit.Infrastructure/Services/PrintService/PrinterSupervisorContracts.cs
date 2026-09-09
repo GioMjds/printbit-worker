@@ -63,7 +63,7 @@ public sealed record PrinterSupervisorSnapshot(
         string? portName) => new(
             WorkerPrintEventType.PrinterSupervisorSnapshot,
             sequence,
-            timestampUtc,
+            timestampUtc.ToUniversalTime(),
             PrinterSupervisorPublicStatus.Ready,
             new SupervisorSpoolerSnapshot("Running", true),
             new SupervisorQueueSnapshot("idle", null),
