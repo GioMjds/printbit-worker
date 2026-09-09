@@ -301,7 +301,8 @@ Dependency direction:
 | `WorkerCommandPipeHostedService` | HardwareService | Background service listening on `WorkerCommandPipeName` for recovery and hardware commands, including feature-gated coin simulation, and writing single-line JSON responses |
 | `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for creating secure Windows ACLs granting admin/system-only access to the command pipe |
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
-| `JobOrchestrator` | Infrastructure | Counts and selects pages, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches the original PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
+| `JobOrchestrator` | Infrastructure | Preprocesses source geometry, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches the prepared PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
+| `DocumentPreprocessor` | Infrastructure | Selects pages, normalizes PDF orientation and rotation, pads odd duplex jobs, rasterizes supported images, and cleans temporary prepared PDFs before printer dispatch |
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation, rotation, paper size) |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
@@ -332,6 +333,7 @@ builder.Services.AddWindowsService(options =>
 builder.Services.AddHostedService<ErrorPipeHostedService>();
 builder.Services.AddSingleton<IDocumentConversionService, LibreOfficeDocumentConversionService>();
 builder.Services.AddHostedService<DocumentConversionPipeHostedService>();
+builder.Services.AddSingleton<IDocumentPreprocessor, DocumentPreprocessor>();
 
 // Printer monitoring and whole-document spooler dispatch
 builder.Services.AddSingleton<PrinterHealthMonitor>();
@@ -552,7 +554,7 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - Standard/High and portrait/landscape combinations use four logical queues for the same physical printer. Quality and paper orientation come from each queue's saved system-wide Epson Printing Defaults, not Sumatra content-orientation options or a generic DPI/`DEVMODE` mapping.
 - Spooler tracking and cancellation use the selected logical queue; physical health checks continue to use `HardwareSettings.PrinterName`.
 - The original PDF is submitted once per requested copy; pages are not split into separate files.
-- Page range, color, explicit content rotation, paper size, fitting, and collation are passed directly to SumatraPDF. Orientation selects the logical queue, and Sumatra auto-rotation remains enabled so content fits the queue's paper orientation.
+- `JobOrchestrator` preprocesses queued sources before dispatch. Page selection, explicit rotation, orientation geometry, image rasterization, and duplex padding are baked into a temporary PDF; color and printer-profile selection remain driver settings.
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)` in `DocumentPrinter`).
 - Success requires both process success and spooler lifecycle verification.
 - Spooler verification checks `Win32_PrintJob.StatusMask` for error, offline, paper-out, blocked-queue, and user-intervention flags and checks `PrinterHealthMonitor` for fatal hardware errors. Hardware errors return `PrintFailureStage.HardwareError` without triggering spooler recovery.

@@ -5,6 +5,7 @@ using PrintBit.Hardware.Devices.Hopper;
 using PrintBit.HardwareService.Services;
 using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.DocumentConversion;
+using PrintBit.Infrastructure.Services.DocumentProcessing;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Infrastructure.Services.SerialService;
 using PrintBit.Infrastructure.Windows.PowerMonitoring;
@@ -36,6 +37,7 @@ builder.Services.AddHostedService<ErrorPipeHostedService>();
 // Document conversion offline service and IPC pipe
 builder.Services.AddSingleton<IDocumentConversionService, LibreOfficeDocumentConversionService>();
 builder.Services.AddHostedService<DocumentConversionPipeHostedService>();
+builder.Services.AddSingleton<IDocumentPreprocessor, DocumentPreprocessor>();
 
 // Printer monitoring and whole-document spooler dispatch
 builder.Services.AddSingleton<PrinterHealthMonitor>();

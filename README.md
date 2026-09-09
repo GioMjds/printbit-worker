@@ -174,7 +174,7 @@ dotnet publish .\src\PrintBit.HardwareService\PrintBit.HardwareService.csproj `
   -r win-x64 `
   --self-contained true `
   -p:PublishSingleFile=true `
-  -o .\publish
+  -o .\publish  
 
 $workerExe = (Resolve-Path '.\publish\PrintBit.HardwareService.exe').Path
 $workerBinPath = '"' + $workerExe + '"'

@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
 using PrintBit.Infrastructure.IPC;
+using PrintBit.Infrastructure.Services.DocumentProcessing;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 using PrintBit.Shared.Printing;
@@ -168,6 +169,69 @@ public class JobOrchestratorTests
         finally
         {
             File.Delete(tempPdf);
+        }
+    }
+
+    [Fact]
+    public async Task ProcessJobAsync_PreprocessesBeforeCountingAndDispatch()
+    {
+        var sourcePdf = CreatePdf(pageCount: 3);
+        var preparedPdf = CreatePdf(pageCount: 1);
+        try
+        {
+            var preprocessor = new Mock<IDocumentPreprocessor>();
+            preprocessor.Setup(service => service.PrepareAsync(
+                    sourcePdf,
+                    It.Is<PrintJobSettings>(settings => settings.RotationDeg == 90),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new PreparedDocument(preparedPdf, 1, [preparedPdf]));
+            var printer = new Mock<IDocumentPrinter>();
+            printer.Setup(service => service.PrintDocumentAsync(
+                    preparedPdf,
+                    "TestPrinter",
+                    1,
+                    It.Is<IReadOnlyList<int>>(pages => pages.SequenceEqual(new[] { 1 })),
+                    It.Is<PrintJobSettings>(settings =>
+                        settings.RotationDeg == 0 && settings.PageRange == null),
+                    It.IsAny<Func<int, int, Task>>(),
+                    It.IsAny<Func<string, Task>>(),
+                    It.IsAny<Func<Task>>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new DocumentPrintResult
+                {
+                    State = PagePrintState.Completed,
+                    PagesPrinted = 1,
+                    TotalPages = 1,
+                    PageCountConfidence = "confirmed"
+                });
+
+            var sut = CreateSut(
+                CreateHealthyMonitor().Object,
+                printer.Object,
+                CreateEventPipe([]).Object,
+                preprocessor: preprocessor.Object);
+
+            var result = await sut.ProcessJobAsync(
+                new PrintJobRequest
+                {
+                    FilePath = sourcePdf,
+                    PrinterName = "TestPrinter",
+                    Settings = new PrintJobSettings
+                    {
+                        RotationDeg = 90,
+                        PageRange = "2"
+                    }
+                },
+                Path.ChangeExtension(sourcePdf, ".json"),
+                CancellationToken.None);
+
+            Assert.True(result.Success);
+            printer.VerifyAll();
+        }
+        finally
+        {
+            File.Delete(sourcePdf);
+            File.Delete(preparedPdf);
         }
     }
 
@@ -352,7 +416,8 @@ public class JobOrchestratorTests
         IPrinterHealthMonitor healthMonitor,
         IDocumentPrinter documentPrinter,
         IWorkerEventPipeClient eventPipe,
-        IPrinterOperationCoordinator? coordinator = null)
+        IPrinterOperationCoordinator? coordinator = null,
+        IDocumentPreprocessor? preprocessor = null)
     {
         return new JobOrchestrator(
             NullLogger<JobOrchestrator>.Instance,
@@ -365,7 +430,23 @@ public class JobOrchestratorTests
             documentPrinter,
             healthMonitor,
             eventPipe,
-            coordinator ?? new PrintOperationCoordinator());
+            coordinator ?? new PrintOperationCoordinator(),
+            preprocessor ?? CreatePassthroughPreprocessor());
+    }
+
+    private static IDocumentPreprocessor CreatePassthroughPreprocessor()
+    {
+        var preprocessor = new Mock<IDocumentPreprocessor>();
+        preprocessor.Setup(service => service.PrepareAsync(
+                It.IsAny<string>(),
+                It.IsAny<PrintJobSettings>(),
+                It.IsAny<CancellationToken>()))
+            .Returns((string path, PrintJobSettings _, CancellationToken _) =>
+                Task.FromResult(new PreparedDocument(
+                    path,
+                    PdfPageCounter.Count(path, "qpdf.exe") ?? 0,
+                    [])));
+        return preprocessor.Object;
     }
 
     private static Mock<IPrinterHealthMonitor> CreateHealthyMonitor()

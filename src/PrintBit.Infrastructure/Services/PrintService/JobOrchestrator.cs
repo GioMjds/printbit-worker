@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PrintBit.Infrastructure.IPC;
+using PrintBit.Infrastructure.Services.DocumentProcessing;
 using PrintBit.Shared.Configurations;
 using PrintBit.Shared.Printing;
 
@@ -14,6 +15,7 @@ public sealed class JobOrchestrator : IJobOrchestrator
     private readonly IPrinterHealthMonitor _healthMonitor;
     private readonly IWorkerEventPipeClient _eventPipe;
     private readonly IPrinterOperationCoordinator _coordinator;
+    private readonly IDocumentPreprocessor _documentPreprocessor;
 
     public JobOrchestrator(
         ILogger<JobOrchestrator> logger,
@@ -21,7 +23,8 @@ public sealed class JobOrchestrator : IJobOrchestrator
         IDocumentPrinter documentPrinter,
         IPrinterHealthMonitor healthMonitor,
         IWorkerEventPipeClient eventPipe,
-        IPrinterOperationCoordinator coordinator)
+        IPrinterOperationCoordinator coordinator,
+        IDocumentPreprocessor documentPreprocessor)
     {
         _logger = logger;
         _settings = options.Value;
@@ -29,6 +32,7 @@ public sealed class JobOrchestrator : IJobOrchestrator
         _healthMonitor = healthMonitor;
         _eventPipe = eventPipe;
         _coordinator = coordinator;
+        _documentPreprocessor = documentPreprocessor;
     }
 
     public async Task<PrintJobResult> ProcessJobAsync(
@@ -50,8 +54,24 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 "Filename does not match the tx_spool layout");
         }
 
-        var pdfPageCount = PdfPageCounter.Count(request.FilePath, _settings.QpdfPath);
-        if (pdfPageCount is null or <= 0)
+        using var prepared = await _documentPreprocessor.PrepareAsync(
+            request.FilePath,
+            request.Settings,
+            cancellationToken);
+        var dispatchSettings = new PrintJobSettings
+        {
+            Copies = request.Settings.Copies,
+            Color = request.Settings.Color,
+            Quality = request.Settings.Quality,
+            Orientation = request.Settings.Orientation,
+            RotationDeg = 0,
+            PaperSize = request.Settings.PaperSize,
+            PageRange = null,
+            Duplex = false
+        };
+
+        var pdfPageCount = prepared.PageCount;
+        if (pdfPageCount <= 0)
         {
             _logger.LogError(
                 "Could not determine PDF page count for {file}",
@@ -62,8 +82,8 @@ public sealed class JobOrchestrator : IJobOrchestrator
         }
 
         var pagesToPrint = GetPagesInRange(
-            pdfPageCount.Value,
-            request.Settings.PageRange);
+            pdfPageCount,
+            null);
         if (pagesToPrint.Count == 0)
         {
             return PrintJobResult.Failed(
@@ -126,11 +146,11 @@ public sealed class JobOrchestrator : IJobOrchestrator
             }
 
             var result = await _documentPrinter.PrintDocumentAsync(
-                request.FilePath,
+                prepared.FilePath,
                 request.PrinterName,
                 copyNumber,
                 pagesToPrint,
-                request.Settings,
+                dispatchSettings,
                 (printed, _) =>
                 {
                     MarkProgress(copyEntries, printed);

@@ -9,4 +9,5 @@ public class PrintJobSettings
     public string? Orientation { get; set; }
     public int RotationDeg { get; set; }
     public string PaperSize { get; set; } = "A4";
+    public bool Duplex { get; set; }
 }

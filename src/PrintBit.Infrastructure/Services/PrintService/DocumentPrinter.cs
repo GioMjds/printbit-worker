@@ -168,12 +168,17 @@ public sealed class DocumentPrinter : IDocumentPrinter
             FormatPageSelection(pages)
         };
 
-        if (settings.RotationDeg is 90 or 180 or 270)
+        printSettings.Add($"paper={NormalizePaperSize(settings.PaperSize)}");
+
+        if (string.Equals(settings.Orientation, "landscape", StringComparison.OrdinalIgnoreCase))
         {
-            printSettings.Add($"rotate={settings.RotationDeg}");
+            printSettings.Add("landscape");
+        }
+        else
+        {
+            printSettings.Add("portrait");
         }
 
-        printSettings.Add($"paper={NormalizePaperSize(settings.PaperSize)}");
         printSettings.Add("fit");
         printSettings.Add("ignore-pdf-print-settings");
         printSettings.Add("collate");
