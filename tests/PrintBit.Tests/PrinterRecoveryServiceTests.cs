@@ -209,6 +209,40 @@ public class PrinterRecoveryServiceTests
     }
 
     [Fact]
+    public async Task AttemptRepairAsync_WhenSpoolerStopped_StartsWithoutRestarting()
+    {
+        var offlineDiagnostic = new PrinterHealthDiagnostic
+        {
+            PrinterState = PrinterHealthState.Offline,
+            IssueKind = PrinterHealthIssueKind.WindowsQueueFault,
+            WinSpoolDescription = "Printer offline"
+        };
+        var healthyDiagnostic = new PrinterHealthDiagnostic
+        {
+            PrinterState = PrinterHealthState.Healthy,
+            IssueKind = PrinterHealthIssueKind.None,
+            WinSpoolDescription = "Ready"
+        };
+        _healthMonitorMock
+            .SetupSequence(h => h.GetDiagnostic("EPSON L5290 Series"))
+            .Returns(offlineDiagnostic)
+            .Returns(healthyDiagnostic);
+        _spoolerControllerMock
+            .Setup(s => s.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpoolerStatusSnapshot { IsRunning = false, Status = "Stopped" });
+        _spoolerControllerMock
+            .Setup(s => s.StartAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpoolerRestartResult { Success = true, FinalStatus = "Running" });
+
+        var result = await CreateService().AttemptRepairAsync(CancellationToken.None);
+
+        Assert.Equal(PrinterRecoveryOutcome.Recovered, result.Outcome);
+        Assert.Equal("StartSpooler", result.Action);
+        _spoolerControllerMock.Verify(s => s.StartAsync(It.IsAny<CancellationToken>()), Times.Once);
+        _spoolerControllerMock.Verify(s => s.RestartAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task AttemptRepairAsync_WhenSpoolerRestartFails_ReturnsRestartFailed()
     {
         // Arrange

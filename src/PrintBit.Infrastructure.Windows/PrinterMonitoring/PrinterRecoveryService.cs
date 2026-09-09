@@ -14,6 +14,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
 {
     private const string DefaultPrinterName = "EPSON L5290 Series";
     private const string RestartSpoolerAction = "RestartSpooler";
+    private const string StartSpoolerAction = "StartSpooler";
 
     private readonly IPrinterHealthMonitor _healthMonitor;
     private readonly IPrintSpoolerController _spoolerController;
@@ -170,14 +171,17 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                 };
             }
 
-            // 3. Windows-side / unknown fault or spooler stopped: perform one Spooler restart
+            // 3. A stopped Spooler must only be started; a running Spooler may be restarted.
             _logger?.LogInformation(
                 "AttemptRepairAsync: Printer '{PrinterName}' has recoverable fault ({State}, {IssueKind}). Attempting Spooler restart.",
                 printerName,
                 diagnostic.PrinterState,
                 diagnostic.IssueKind);
 
-            var restartResult = await _spoolerController.RestartAsync(cancellationToken);
+            var action = spoolerStatus.IsRunning ? RestartSpoolerAction : StartSpoolerAction;
+            var restartResult = spoolerStatus.IsRunning
+                ? await _spoolerController.RestartAsync(cancellationToken)
+                : await _spoolerController.StartAsync(cancellationToken);
             if (!restartResult.Success)
             {
                 var errorMsg = $"Print Spooler restart failed: {restartResult.Error}";
@@ -188,7 +192,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     RequestId = string.Empty,
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.RestartFailed,
-                    Action = RestartSpoolerAction,
+                    Action = action,
                     SpoolerState = MapSpoolerState(restartResult),
                     PrinterState = diagnostic.PrinterState.ToString(),
                     IssueKind = diagnostic.IssueKind.ToString(),
@@ -232,7 +236,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     RequestId = string.Empty,
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.Recovered,
-                    Action = RestartSpoolerAction,
+                    Action = action,
                     SpoolerState = MapSpoolerState(restartResult),
                     PrinterState = latestDiagnostic.PrinterState.ToString(),
                     IssueKind = latestDiagnostic.IssueKind.ToString(),
@@ -270,7 +274,7 @@ public class PrinterRecoveryService : IPrinterRecoveryService
                     RequestId = string.Empty,
                     Type = PrinterRecoveryCommandType.AttemptPrinterRecovery,
                     Outcome = PrinterRecoveryOutcome.RestartFailed,
-                    Action = RestartSpoolerAction,
+                    Action = action,
                     SpoolerState = MapSpoolerState(restartResult),
                     PrinterState = latestDiagnostic.PrinterState.ToString(),
                     IssueKind = latestDiagnostic.IssueKind.ToString(),
