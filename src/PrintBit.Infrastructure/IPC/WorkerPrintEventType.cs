@@ -23,6 +23,7 @@ public enum WorkerPrintEventType
     UsbInserted = 18,
     UsbRemoved = 19,
     NetworkStatusSnapshot = 20,
-    PrinterSupervisorSnapshot = 21
+    PrinterSupervisorSnapshot = 21,
+    PrintProgress = 22
 }
 

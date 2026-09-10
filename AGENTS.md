@@ -109,20 +109,20 @@ Defined in `Esp32Command`:
 
 ### Epson L5290 Print Dispatch
 
-`DocumentPrinter` submits the original PDF once per requested copy:
+`DocumentPrinter` submits the prepared PDF once with the requested native copy count:
 
 ```
-SumatraPDF.exe -print-to "<printerName>" -print-settings "1x,<color|monochrome>,<pages>[,rotate=<degrees>],paper=<size>,fit,ignore-pdf-print-settings,collate" -silent "<filePath>"
+SumatraPDF.exe -print-to "<printerName>" -print-settings "<copies>x,<color|monochrome>,<pages>,paper=<size>,fit,ignore-pdf-print-settings,collate" -silent "<filePath>"
 ```
 
 Critical constraints:
 - `SumatraPDF.exe` path comes from `HardwareSettings.SumatraPath` (default `C:\Users\printbit\bin\SumatraPDF.exe`).
 - The physical printer identity comes from `HardwareSettings.PrinterName`; it is used for health monitoring and must exactly match Windows registration.
 - The dispatch queue comes from `HardwareSettings.PrinterProfiles`: quality and orientation select `Standard`, `StandardLandscape`, `High`, or `HighLandscape`; Standard portrait falls back to `PrinterName`.
-- Each copy is a separate spooler job; pages within a copy are not split into derivative PDFs.
+- All requested copies are submitted as one native multi-copy spooler job; the prepared PDF is not duplicated or split per copy.
 - Page ranges, color, explicit content rotation, paper size, fitting, and collation are passed through Sumatra's `-print-settings` argument. Paper orientation comes from the selected queue's Epson defaults, with Sumatra auto-rotation enabled to fit PDF content to that paper.
 - Print jobs are serialized via `SemaphoreSlim(1, 1)` inside `DocumentPrinter`.
-- Before each copy, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy` to return true.
+- Before dispatch, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy` to return true.
 - Print quality is supplied by fixed Windows logical queues whose system-wide Epson Printing Defaults are preconfigured as Standard or High. `DocumentPrinter` does not mutate global `DEVMODE` settings per job.
 - Timeout is 2 minutes (`HardwareSettings.PrintTimeoutSeconds = 120`).
 - Exit code `0` is not enough: service also verifies spooler lifecycle (`Win32_PrintJob`) before returning success.
@@ -130,8 +130,10 @@ Critical constraints:
 - A spooler or hardware error pauses the same job for up to `PauseTimeoutMinutes`; recovery resumes it without submitting a replacement job.
 - The expected page count is computed up front by `PdfPageCounter`, which parses the original PDF and falls back to `qpdf --show-npages` for compressed streams. qpdf is not used to split pages.
 - `Win32_PrintJob.PagesPrinted` is captured as best-effort progress. It may remain zero or lag behind physical output.
+- Active spooler jobs are polled every 500 ms so available progress reaches Node promptly; native multi-copy jobs may still expose only document-page granularity until completion.
+- The 45-second healthy spooler verification window restarts whenever `PagesPrinted` advances or a paused job resumes, preventing long but progressing jobs from being reported as failures.
 - When a cleared job's last positive `TotalPages` is lower than the selected-page count, verification fails with `PrintFailureStage.IncompleteOutput`.
-- After each whole-document copy clears, `DocumentPrinter` keeps the configured 12-second post-clear hardware guard window before returning success.
+- After the multi-copy job clears, `DocumentPrinter` keeps the configured 12-second post-clear hardware guard window before returning success.
 - Page counts from WMI are unreliable and can lag behind job completion. If the job has cleared and the printer is completely healthy, the print is treated as a success even if the last polled page count was less than expected, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated or aborted job).
 - `PrinterHealthMonitor` checks WMI `DetectedErrorState`, `ExtendedPrinterStatus`, Epson popups, and WinSpool status, treating fatal codes (e.g. Paper Out code 4, Jam code 8, Door Open code 7) as fatal errors exposed via `IsHealthy` and `HasFatalHardwareError`.
 - Hardware errors return `PrintFailureStage.HardwareError`; no spooler recovery is triggered for hardware errors.
@@ -159,15 +161,15 @@ Critical constraints:
 
 | Field | Required | Notes |
 |---|---|---|
-| `type` | Yes | `PrintStarted`, `PrintSucceeded`, `PrintFailed`, `PrinterOffline`, `PrinterOnline`, or `PrinterError` |
+| `type` | Yes | `PrintStarted`, `PrintProgress`, `PrintSucceeded`, `PrintFailed`, `PrinterOffline`, `PrinterOnline`, or `PrinterError` |
 | `transactionId` | No | Parsed from queue file name |
 | `spoolerCorrelationKey` | No | Parsed from queue file name |
 | `fileName` | No | Queue file name |
 | `printerName` | No | Printer display name |
 | `failureStage` | No | `PrintFailureStage` string when failed; `hardware_error` for `PrinterError` |
 | `message` | No | Success summary or failure detail |
-| `pagesPrinted` | No | Completed logical pages across copies; best effort on failure |
-| `totalPages` | No | Total selected pages across copies on terminal events |
+| `pagesPrinted` | No | Completed logical pages across copies; emitted live by `PrintProgress` and best effort on failure |
+| `totalPages` | No | Total selected pages across copies on progress and terminal events |
 | `pageCountConfidence` | No | `confirmed`, `best_effort`, or `unknown` |
 | `pages` | No | Per-page/copy terminal states (`completed`, `failed`, or `cancelled`) |
 | `timestampUtc` | Yes | ISO-8601 timestamp |
@@ -309,7 +311,7 @@ Dependency direction:
 | `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for strict Windows ACLs granting system/admin plus one configured client SID |
 | `WorkerInstanceLock` | HardwareService | Machine-wide mutex that prevents service/debug duplicate ownership |
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
-| `JobOrchestrator` | Infrastructure | Preprocesses source geometry, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches the prepared PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
+| `JobOrchestrator` | Infrastructure | Preprocesses source geometry, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches one native multi-copy job, maps best-effort progress to page/copy results, and emits lifecycle events |
 | `DocumentPreprocessor` | Infrastructure | Selects pages, normalizes PDF orientation and rotation, pads odd duplex jobs, rasterizes supported images, and cleans temporary prepared PDFs before printer dispatch |
 | `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation, rotation, paper size) |
 
@@ -564,7 +566,7 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - Exact printer-name matching is required.
 - Standard/High and portrait/landscape combinations use four logical queues for the same physical printer. Quality and paper orientation come from each queue's saved system-wide Epson Printing Defaults, not Sumatra content-orientation options or a generic DPI/`DEVMODE` mapping.
 - Spooler tracking and cancellation use the selected logical queue; physical health checks continue to use `HardwareSettings.PrinterName`.
-- The original PDF is submitted once per requested copy; pages are not split into separate files.
+- The prepared PDF is submitted once with Sumatra's native copy count; it is not duplicated or split per copy.
 - `JobOrchestrator` preprocesses queued sources before dispatch. Page selection, explicit rotation, orientation geometry, image rasterization, and duplex padding are baked into a temporary PDF; color and printer-profile selection remain driver settings.
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)` in `DocumentPrinter`).
 - Success requires both process success and spooler lifecycle verification.
@@ -573,7 +575,7 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - `DocumentPrinter` enforces one configured 12-second post-clear guard window per whole-document copy to detect delayed Epson popup/hardware faults.
 - If the spooler job clears and the printer is completely healthy (no error reported via WMI, Epson popups, or direct WinSpool checks), the print is treated as a success regardless of WMI page count reporting lag, provided the last polled spooler `TotalPages` is not less than the expected page count (a lower `TotalPages` indicates a truncated/aborted job).
 - `Win32_PrintJob.PagesPrinted` is best-effort telemetry, not proof that a sheet physically exited. Terminal events label the count `confirmed`, `best_effort`, or `unknown`.
-- Before each copy, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy`; an in-flight job with recoverable status flags remains in the spooler and resumes after health returns.
+- Before dispatch, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy`; an in-flight job with recoverable status flags remains in the spooler and resumes after health returns.
 - `PrinterHealthMonitor` reports fatal driver/WMI error states (such as Paper Out) to Node.js as `PrinterError` and exposes them to in-flight print verification.
 - Queue watcher requests go directly to `JobOrchestrator` (no transaction gate).
 

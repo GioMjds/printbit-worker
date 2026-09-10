@@ -10,7 +10,27 @@ namespace PrintBit.Tests;
 public class DocumentPrinterTests
 {
     [Fact]
-    public void BuildPrintProcess_UsesOriginalPdfWithOneCopyAndSelectedPages()
+    public void SpoolerPolling_IsFrequentEnoughForResponsiveProgress()
+    {
+        Assert.True(DocumentPrinter.SpoolerPollInterval <= TimeSpan.FromMilliseconds(500));
+    }
+
+    [Fact]
+    public void RefreshVerificationDeadline_ProgressRestartsGraceWindow()
+    {
+        var startedAt = new DateTime(2026, 9, 11, 0, 0, 0, DateTimeKind.Utc);
+        var originalDeadline = startedAt.AddSeconds(45);
+        var progressAt = startedAt.AddSeconds(44);
+
+        var refreshed = DocumentPrinter.RefreshVerificationDeadline(
+            originalDeadline,
+            progressAt);
+
+        Assert.Equal(progressAt.AddSeconds(45), refreshed);
+    }
+
+    [Fact]
+    public void BuildPrintProcess_UsesOriginalPdfWithNativeCopiesAndSelectedPages()
     {
         using var process = DocumentPrinter.BuildPrintProcess(
             "SumatraPDF.exe",
@@ -19,6 +39,7 @@ public class DocumentPrinterTests
             [1, 2, 3],
             new PrintJobSettings
             {
+                Copies = 3,
                 Color = true,
                 Orientation = "landscape",
                 RotationDeg = 90,
@@ -30,7 +51,7 @@ public class DocumentPrinterTests
         Assert.Equal("EPSON L5290 Series", args[1]);
         Assert.Equal("-print-settings", args[2]);
         Assert.Equal(
-            "1x,color,1-3,paper=legal,landscape,fit,ignore-pdf-print-settings,collate",
+            "3x,color,1-3,paper=legal,landscape,fit,ignore-pdf-print-settings,collate",
             args[3]);
         Assert.Equal("-silent", args[4]);
         Assert.Equal(@"C:\PrintBit\job.pdf", args[5]);
@@ -253,6 +274,50 @@ public class DocumentPrinterTests
             Assert.Equal(PagePrintState.Failed, result.State);
             Assert.Equal(PrintFailureStage.Timeout, result.FailureStage);
             Assert.Equal("Sumatra process timeout", result.ErrorMessage);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
+    [Fact]
+    public async Task PrintDocumentAsync_NativeCopies_AcceptsSpoolerDocumentPageCount()
+    {
+        var dummyExe = GetDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var healthMock = new Mock<IPrinterHealthMonitor>();
+            var pollCount = 0;
+            healthMock.Setup(h => h.QueryJobStatus(It.IsAny<string>(), It.IsAny<string>()))
+                .Returns(() => ++pollCount == 1
+                    ? (true, 0x10u, "Printing", 3, 3, "123")
+                    : (false, 0u, string.Empty, 0, 0, null));
+
+            var errorCode = 0;
+            var errorMessage = string.Empty;
+            healthMock.Setup(h => h.HasFatalHardwareError(It.IsAny<string>(), out errorCode, out errorMessage))
+                .Returns(false);
+
+            var sut = CreateSut(dummyExe, healthMock.Object);
+            var result = await sut.PrintDocumentAsync(
+                tempPdf,
+                "TestPrinter",
+                1,
+                [1, 2, 3],
+                new PrintJobSettings { Copies = 2 },
+                (_, _) => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
+                CancellationToken.None);
+
+            Assert.Equal(PagePrintState.Completed, result.State);
+            Assert.Equal(6, result.PagesPrinted);
+            Assert.Equal(6, result.TotalPages);
+            Assert.Equal("confirmed", result.PageCountConfidence);
         }
         finally
         {

@@ -8,6 +8,11 @@ namespace PrintBit.Infrastructure.Services.PrintService;
 
 public sealed class DocumentPrinter : IDocumentPrinter
 {
+    internal static readonly TimeSpan SpoolerPollInterval =
+        TimeSpan.FromMilliseconds(500);
+    internal static readonly TimeSpan SpoolerProgressGracePeriod =
+        TimeSpan.FromSeconds(45);
+
     private const uint JobErrorMask =
         0x00000002 | // Error
         0x00000020 | // Offline
@@ -52,17 +57,19 @@ public sealed class DocumentPrinter : IDocumentPrinter
             return Failed(PrintFailureStage.Validation, "No pages selected for printing", 0);
         }
 
+        var expectedPages = pages.Count * Math.Max(1, settings.Copies);
+
         await PrintLock.WaitAsync(cancellationToken);
         try
         {
             if (!File.Exists(filePath))
             {
-                return Failed(PrintFailureStage.Validation, "PDF file not found", pages.Count);
+                return Failed(PrintFailureStage.Validation, "PDF file not found", expectedPages);
             }
 
             if (!File.Exists(_settings.SumatraPath))
             {
-                return Failed(PrintFailureStage.Validation, "SumatraPDF executable not found", pages.Count);
+                return Failed(PrintFailureStage.Validation, "SumatraPDF executable not found", expectedPages);
             }
 
             string dispatchPrinterName;
@@ -75,15 +82,15 @@ public sealed class DocumentPrinter : IDocumentPrinter
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
             {
-                return Failed(PrintFailureStage.Validation, ex.Message, pages.Count);
+                return Failed(PrintFailureStage.Validation, ex.Message, expectedPages);
             }
 
             _logger.LogInformation(
-                "Dispatching whole PDF copy {copyNumber} from {filePath} to profile queue {dispatchPrinterName} for physical printer {printerName} (Quality={quality}, Orientation={orientation}, PaperSize={paperSize}, Pages={pageCount})",
-                copyNumber,
+                "Dispatching PDF from {filePath} to profile queue {dispatchPrinterName} for physical printer {printerName} (Copies={copies}, Quality={quality}, Orientation={orientation}, PaperSize={paperSize}, Pages={pageCount})",
                 filePath,
                 dispatchPrinterName,
                 printerName,
+                Math.Max(1, settings.Copies),
                 settings.Quality,
                 settings.Orientation,
                 settings.PaperSize,
@@ -107,7 +114,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
             }
             catch (Exception ex)
             {
-                return Failed(PrintFailureStage.ProcessStart, ex.Message, pages.Count);
+                return Failed(PrintFailureStage.ProcessStart, ex.Message, expectedPages);
             }
 
             using var timeoutCts = new CancellationTokenSource(
@@ -123,25 +130,27 @@ public sealed class DocumentPrinter : IDocumentPrinter
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 try { process.Kill(true); } catch { }
-                return Failed(PrintFailureStage.Timeout, "Sumatra process timeout", pages.Count);
+                return Failed(PrintFailureStage.Timeout, "Sumatra process timeout", expectedPages);
             }
 
             _logger.LogInformation(
-                "SumatraPDF exited with code {exitCode} for copy {copyNumber}",
+                "SumatraPDF exited with code {exitCode} for {copyCount} native copies (dispatch {copyNumber})",
                 process.ExitCode,
+                Math.Max(1, settings.Copies),
                 copyNumber);
 
             if (process.ExitCode != 0)
             {
                 var error = await process.StandardError.ReadToEndAsync(cancellationToken);
                 _logger.LogWarning("SumatraPDF error output: {error}", error);
-                return Failed(PrintFailureStage.ProcessExit, error, pages.Count);
+                return Failed(PrintFailureStage.ProcessExit, error, expectedPages);
             }
 
             return await VerifySpoolerDocumentLifecycleAsync(
                 dispatchPrinterName,
                 printerName,
                 Path.GetFileName(filePath),
+                expectedPages,
                 pages.Count,
                 onProgress,
                 onPaused,
@@ -163,7 +172,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
     {
         var printSettings = new List<string>
         {
-            "1x",
+            $"{Math.Max(1, settings.Copies)}x",
             settings.Color ? "color" : "monochrome",
             FormatPageSelection(pages)
         };
@@ -214,12 +223,13 @@ public sealed class DocumentPrinter : IDocumentPrinter
         string physicalPrinterName,
         string documentName,
         int expectedPages,
+        int minimumSpoolerPages,
         Func<int, int, Task> onProgress,
         Func<string, Task> onPaused,
         Func<Task> onResumed,
         CancellationToken cancellationToken)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(45);
+        var deadline = DateTime.UtcNow.Add(SpoolerProgressGracePeriod);
         var patienceDeadline = DateTime.UtcNow.AddMinutes(_settings.PauseTimeoutMinutes);
         var inPatienceMode = false;
         var observedActive = false;
@@ -246,6 +256,9 @@ public sealed class DocumentPrinter : IDocumentPrinter
                     if (printed > maxPagesPrinted)
                     {
                         maxPagesPrinted = Math.Min(printed, expectedPages);
+                        deadline = RefreshVerificationDeadline(
+                            deadline,
+                            DateTime.UtcNow);
                         await onProgress(maxPagesPrinted, expectedPages);
                     }
 
@@ -278,7 +291,9 @@ public sealed class DocumentPrinter : IDocumentPrinter
                         inPatienceMode = false;
                         activeErrorMessage = null;
                         await onResumed();
-                        deadline = DateTime.UtcNow.AddSeconds(45);
+                        deadline = RefreshVerificationDeadline(
+                            deadline,
+                            DateTime.UtcNow);
                     }
                 }
                 else
@@ -295,11 +310,11 @@ public sealed class DocumentPrinter : IDocumentPrinter
 
                     if (observedActive)
                     {
-                        if (lastTotalPages > 0 && lastTotalPages < expectedPages)
+                        if (lastTotalPages > 0 && lastTotalPages < minimumSpoolerPages)
                         {
                             return Failed(
                                 PrintFailureStage.IncompleteOutput,
-                                $"Spooler reported {lastTotalPages} of {expectedPages} expected pages",
+                                $"Spooler reported {lastTotalPages} of {minimumSpoolerPages} selected pages",
                                 expectedPages,
                                 maxPagesPrinted,
                                 lastSpoolerJobId);
@@ -342,7 +357,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
                     }
                 }
 
-                await Task.Delay(2000, cancellationToken);
+                await Task.Delay(SpoolerPollInterval, cancellationToken);
             }
         }
         catch (OperationCanceledException)
@@ -405,6 +420,16 @@ public sealed class DocumentPrinter : IDocumentPrinter
 
         ranges.Add(start == previous ? start.ToString() : $"{start}-{previous}");
         return string.Join(',', ranges);
+    }
+
+    internal static DateTime RefreshVerificationDeadline(
+        DateTime currentDeadline,
+        DateTime progressAt)
+    {
+        var refreshedDeadline = progressAt.Add(SpoolerProgressGracePeriod);
+        return refreshedDeadline > currentDeadline
+            ? refreshedDeadline
+            : currentDeadline;
     }
 
     private static DocumentPrintResult Completed(int expectedPages, string? spoolerJobId) => new()
