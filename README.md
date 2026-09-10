@@ -90,7 +90,11 @@ Cross-cutting types with no dependencies.
   "IpcSettings": {
     "PipeName": "printbit-node-errors",
     "MaxMessageBytes": 8192,
-    "WorkerReturnPipeName": "printbit-worker-events"
+    "WorkerReturnPipeName": "printbit-worker-events",
+    "WorkerCommandPipeName": "printbit-worker-commands",
+    "WorkerCommandMaxConcurrency": 4,
+    "WorkerCommandAllowedClientIdentity": null,
+    "WorkerInstanceLockName": "Global\\PrintBitHardwareWorker"
   }
 }
 ```
@@ -105,6 +109,10 @@ Cross-cutting types with no dependencies.
 | `IpcSettings.PipeName` | `printbit-node-errors` | Named pipe for Node error messages |
 | `IpcSettings.MaxMessageBytes` | `8192` | Max bytes per error line |
 | `IpcSettings.WorkerReturnPipeName` | `printbit-worker-events` | Named pipe for worker return events |
+| `IpcSettings.WorkerCommandPipeName` | `printbit-worker-commands` | Node-to-worker command pipe |
+| `IpcSettings.WorkerCommandMaxConcurrency` | `4` | Maximum active command handlers |
+| `IpcSettings.WorkerCommandAllowedClientIdentity` | empty | Optional exact account name or SID granted read/write access |
+| `IpcSettings.WorkerInstanceLockName` | `Global\\PrintBitHardwareWorker` | Machine-wide duplicate-worker lock |
 
 ---
 
@@ -194,6 +202,22 @@ depend on a kiosk-user password or the **Log on as a service** right. `SYSTEM`
 must retain access to the configured queue, failed, and executable paths.
 Success means `sc.exe create` reports `CreateService SUCCESS` and the final
 query reaches `STATE: 4 RUNNING`.
+
+The default LocalSystem service does not need an optional client SID because the
+Node startup task also runs as SYSTEM in `-AtStartup` mode. For Assigned Access
+deployments that launch Node at kiosk-account logon, register the Node task with
+`install-startup.ps1 -KioskUser .\printbit`; that installer resolves the account
+SID and persists it as machine-scoped `Ipc__WorkerCommandAllowedClientIdentity`.
+
+After installation or an update, run `pnpm run worker-pipe:verify` from the Node
+repository. It checks service state, automatic startup, exactly one worker
+process, scheduled-task identity, configured SID, and a harmless command-pipe
+request/response.
+
+The command listener keeps a replacement pipe instance ready while a request is
+processed and handles up to `WorkerCommandMaxConcurrency` clients. A second
+worker executable cannot acquire `Global\PrintBitHardwareWorker`; it logs a
+critical startup error and exits with code 2.
 
 Always publish the worker `.csproj` directly. Publishing the solution with one
 shared `--output` directory can produce `NETSDK1194` and unnecessarily restores

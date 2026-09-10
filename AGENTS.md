@@ -233,7 +233,7 @@ Hardware commands return command-specific response payloads. `SimulateCoin` retu
 #### Node Handoff Contract
 
 The administrative Node.js service must satisfy the following operational contract:
-- **Administrative Connection**: The Node client process must run with elevated administrative tokens (`BUILTIN\Administrators`) to satisfy the command pipe DACL.
+- **Administrative Connection**: The Node client process must run as LocalSystem or as the exact account/SID configured by `IpcSettings.WorkerCommandAllowedClientIdentity`; `BUILTIN\Administrators` remains an allowed maintenance identity.
 - **Response Timeout Deadline (>= 45s)**: The maximum duration of a worker recovery cycle is bounded by `SpoolerTransitionTimeoutSeconds` (30s) + `HealthRecheckTimeoutSeconds` (10s) + overhead (~5s). The Node client must configure an I/O response deadline of at least **45 seconds** before timing out the connection.
 - **Audit & History Persistence**: Because the C# worker is stateless, the Node service is solely responsible for recording recovery attempts, timestamps, request IDs, and outcomes into durable disk-backed logs or a database for technician auditing.
 - **Transaction Gating**: Node must keep customer transactions blocked (preventing coin acceptance / UI print flow) while printer status is unhealthy or while recovery is in flight, until a `healthy` or `recovered` outcome is received.
@@ -261,9 +261,16 @@ Windows Assigned Access restricts the kiosk account.
 - **C# worker command pipe** (`printbit-worker-commands`): Created using
   `NamedPipeServerStreamAcl.Create` with strict Windows `PipeSecurity` configured
   via `WorkerCommandPipeSecurity`. Grants `FullControl` to current service identity
-  and `LocalSystemSid`, and `ReadWrite` to `BuiltinAdministratorsSid`. Explicitly
-  excludes `WorldSid` (Everyone) and `AuthenticatedUserSid` so unprivileged kiosk
-  identities cannot trigger recovery or query internal diagnostics.
+  and `LocalSystemSid`, `ReadWrite` to `BuiltinAdministratorsSid`, and optionally
+  `ReadWrite` to the exact SID/account in `IpcSettings.WorkerCommandAllowedClientIdentity`.
+  Invalid identities and broad principals (`WorldSid` / Everyone and
+  `AuthenticatedUserSid`) are rejected; they are never silently widened.
+
+The command listener creates a replacement server instance before dispatching an
+accepted client and tracks handlers behind `WorkerCommandMaxConcurrency` (default
+4). Client parse/I/O failures are isolated and do not stop the accept loop. The
+worker acquires `IpcSettings.WorkerInstanceLockName` (`Global\PrintBitHardwareWorker`)
+before host startup; a duplicate executable exits with code 2.
 
 If the kiosk is re-deployed with the two processes under the same identity,
 the cross-identity DACL considerations become inert (the default DACL is
@@ -298,8 +305,9 @@ Dependency direction:
 | `IPrinterRecoveryService` / `PrinterRecoveryService` | Infrastructure / Infrastructure.Windows | Printer recovery service orchestrating typed diagnostics, physical fault avoidance, and bounded native Spooler restart |
 | `IPrintSpoolerController` / `ServiceControllerSpoolerController` | Infrastructure.Windows | Native Windows ServiceController implementation managing Spooler service status and clean restarts |
 | `IPrinterOperationCoordinator` | Infrastructure | Recovery contract and exclusive print/recovery lease gate; registered as singleton `PrintOperationCoordinator` in `Program.cs` |
-| `WorkerCommandPipeHostedService` | HardwareService | Background service listening on `WorkerCommandPipeName` for recovery and hardware commands, including feature-gated coin simulation, and writing single-line JSON responses |
-| `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for creating secure Windows ACLs granting admin/system-only access to the command pipe |
+| `WorkerCommandPipeHostedService` | HardwareService | Replacement-listener background service accepting up to `WorkerCommandMaxConcurrency` recovery/hardware clients and writing single-line JSON responses |
+| `WorkerCommandPipeSecurity` | Infrastructure.IPC | Factory for strict Windows ACLs granting system/admin plus one configured client SID |
+| `WorkerInstanceLock` | HardwareService | Machine-wide mutex that prevents service/debug duplicate ownership |
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
 | `JobOrchestrator` | Infrastructure | Preprocesses source geometry, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches the prepared PDF once per copy, maps best-effort progress to page/copy results, and emits lifecycle events |
 | `DocumentPreprocessor` | Infrastructure | Selects pages, normalizes PDF orientation and rotation, pads odd duplex jobs, rasterizes supported images, and cleans temporary prepared PDFs before printer dispatch |
@@ -389,7 +397,10 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "PipeName": "printbit-node-errors",
     "MaxMessageBytes": 8192,
     "WorkerReturnPipeName": "printbit-worker-events",
-    "WorkerCommandPipeName": "printbit-worker-commands"
+    "WorkerCommandPipeName": "printbit-worker-commands",
+    "WorkerCommandMaxConcurrency": 4,
+    "WorkerCommandAllowedClientIdentity": null,
+    "WorkerInstanceLockName": "Global\\PrintBitHardwareWorker"
   },
   "PrinterRecoverySettings": {
     "ServiceName": "Spooler",
