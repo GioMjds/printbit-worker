@@ -1,10 +1,9 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using System.Threading;
+using System.Threading.Tasks;
 
-namespace PrintBit.Infrastructure.Windows.Time
+namespace PrintBit.Infrastructure.Windows.Time;
+
+public interface ITrustedTimeProvider
 {
-    internal class ITrustedTimeProvider
-    {
-    }
+    Task<TrustedTimeSnapshot> GetStatusAsync(string? ntpServer, int maxDriftMs, CancellationToken cancellationToken);
 }
