@@ -2,10 +2,11 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Linq;
 using PrintBit.Infrastructure.Services.PrintService;
 
 namespace PrintBit.Infrastructure.IPC;
