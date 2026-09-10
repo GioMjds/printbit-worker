@@ -21,6 +21,7 @@ public enum WorkerPrintEventType
     ScanCompleted = 16,
     ScanFailed = 17,
     UsbInserted = 18,
-    UsbRemoved = 19
+    UsbRemoved = 19,
+    NetworkStatusSnapshot = 20
 }
 

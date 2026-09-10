@@ -113,4 +113,8 @@ public sealed record WorkerPrintEvent
     [JsonPropertyName("usbDrive")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public WorkerUsbDrive? UsbDrive { get; init; }
+
+    [JsonPropertyName("networkStatus")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WorkerNetworkStatus? NetworkStatus { get; init; }
 }

@@ -1,10 +1,10 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
-namespace PrintBit.Infrastructure.Windows.Networking
+namespace PrintBit.Infrastructure.Windows.Networking;
+
+public interface IKioskNetworkPlatform
 {
-    internal class IKioskNetworkPlatform
-    {
-    }
+    Task<KioskNetworkSnapshot> PrepareAsync(IReadOnlyList<string> preferredSubnetPrefixes, int port, CancellationToken cancellationToken);
 }

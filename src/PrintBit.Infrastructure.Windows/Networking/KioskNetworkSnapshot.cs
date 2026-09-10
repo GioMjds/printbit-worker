@@ -1,10 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace PrintBit.Infrastructure.Windows.Networking;
 
-namespace PrintBit.Infrastructure.Windows.Networking
-{
-    internal class KioskNetworkSnapshot
-    {
-    }
-}
+public sealed record KioskNetworkSnapshot(
+    bool Success,
+    string? KioskIp,
+    bool FirewallReady,
+    string? ErrorCode,
+    string? Detail);
