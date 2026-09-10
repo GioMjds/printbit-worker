@@ -41,7 +41,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         int DetectedErrorState,
         int ExtendedPrinterStatus,
         bool HasEpsonPopup,
-        string EpsonPopupContent);
+        string EpsonPopupContent,
+        string? PortName);
 
     // Win32 APIs for Epson Status Monitor Popup checking
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
@@ -212,7 +213,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             WinSpoolDescription = probes.WinSpoolDescription,
             WmiCode = wmiCode,
             WmiDescription = wmiDescription,
-            EpsonPopupText = probes.HasEpsonPopup ? probes.EpsonPopupContent : null
+            EpsonPopupText = probes.HasEpsonPopup ? probes.EpsonPopupContent : null,
+            PortName = probes.PortName
         };
     }
 
@@ -234,6 +236,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             out var detectedErrorState,
             out var extendedPrinterStatus);
         var (hasPopup, _, _, popupContent) = CheckEpsonStatusMonitorPopup(printerName);
+        _ = TryReadPrinterPort(printerName, out var portName);
 
         return new PrinterHealthProbes(
             winSpoolAvailable,
@@ -244,7 +247,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
             detectedErrorState,
             extendedPrinterStatus,
             hasPopup,
-            popupContent);
+            popupContent,
+            portName);
     }
 
     public async Task<bool> WaitForPrinterHealthyAsync(
@@ -439,6 +443,37 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to read printer status for {printerName}", printerName);
+        }
+
+        return false;
+    }
+
+    protected virtual bool TryReadPrinterPort(string printerName, out string? portName)
+    {
+        portName = null;
+
+        try
+        {
+            var escapedPrinterName = printerName.Replace("'", "''");
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT PortName FROM Win32_Printer WHERE Name = '{escapedPrinterName}'");
+            using var results = searcher.Get();
+            foreach (ManagementObject printer in results.Cast<ManagementObject>())
+            {
+                try
+                {
+                    portName = printer["PortName"]?.ToString();
+                    return true;
+                }
+                finally
+                {
+                    printer.Dispose();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read printer port for {printerName}", printerName);
         }
 
         return false;

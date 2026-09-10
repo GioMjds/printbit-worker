@@ -164,4 +164,52 @@ public class ServiceControllerSpoolerController : IPrintSpoolerController
             };
         }
     }
+
+    public async Task<SpoolerRestartResult> StartAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var serviceName = _settings.ServiceName;
+        var timeout = TimeSpan.FromSeconds(Math.Max(1, _settings.SpoolerTransitionTimeoutSeconds));
+
+        try
+        {
+            using var controller = new ServiceController(serviceName);
+            controller.Refresh();
+            if (controller.Status == ServiceControllerStatus.Running)
+            {
+                return new SpoolerRestartResult { Success = true, FinalStatus = controller.Status.ToString() };
+            }
+
+            if (controller.Status != ServiceControllerStatus.StartPending)
+            {
+                controller.Start();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            while (controller.Status != ServiceControllerStatus.Running)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (stopwatch.Elapsed > timeout)
+                {
+                    var message = $"Timed out after {timeout.TotalSeconds}s waiting for service '{serviceName}' to start. Current status: {controller.Status}.";
+                    return new SpoolerRestartResult { Success = false, Error = message, FinalStatus = controller.Status.ToString() };
+                }
+
+                await Task.Delay(200, cancellationToken);
+                controller.Refresh();
+            }
+
+            return new SpoolerRestartResult { Success = true, FinalStatus = controller.Status.ToString() };
+        }
+        catch (OperationCanceledException)
+        {
+            return new SpoolerRestartResult { Success = false, Error = $"Start of service '{serviceName}' was cancelled.", FinalStatus = "Cancelled" };
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Exception encountered while starting service '{ServiceName}'", serviceName);
+            return new SpoolerRestartResult { Success = false, Error = ex.Message, FinalStatus = "Error" };
+        }
+    }
 }

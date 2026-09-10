@@ -97,6 +97,7 @@ public class PrinterHealthMonitorTests
         public int DetectedErrorState { get; init; }
         public int ExtendedPrinterStatus { get; init; } = 3;
         public string? EpsonPopupText { get; init; }
+        public string? WmiPortName { get; init; }
 
         public DiagnosticPrinterHealthMonitor()
             : base(
@@ -126,6 +127,12 @@ public class PrinterHealthMonitorTests
             detectedErrorState = DetectedErrorState;
             extendedPrinterStatus = ExtendedPrinterStatus;
             return WmiAvailable;
+        }
+
+        protected override bool TryReadPrinterPort(string printerName, out string? portName)
+        {
+            portName = WmiPortName;
+            return WmiPortName is not null;
         }
 
         protected override (bool HasPopup, int ProcessId, string WindowTitle, string Content)
@@ -280,6 +287,14 @@ public class PrinterHealthMonitorTests
         Assert.Null(diagnostic.WmiDescription);
         Assert.Null(diagnostic.EpsonPopupText);
         Assert.True(diagnostic.IsHealthy);
+    }
+
+    [Fact]
+    public void ExactQueueDiagnostic_ReportsCurrentPort()
+    {
+        var monitor = new DiagnosticPrinterHealthMonitor { WmiPortName = "USB005" };
+
+        Assert.Equal("USB005", monitor.GetDiagnostic("EPSON L5290 Series").PortName);
     }
 
     [Theory]

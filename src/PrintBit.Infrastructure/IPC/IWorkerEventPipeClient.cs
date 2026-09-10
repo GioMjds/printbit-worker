@@ -1,3 +1,5 @@
+using PrintBit.Infrastructure.Services.PrintService;
+
 namespace PrintBit.Infrastructure.IPC;
 
 public interface IWorkerEventPipeClient
@@ -9,4 +11,8 @@ public interface IWorkerEventPipeClient
     Task<bool> PublishAsync(
         WorkerPrintEvent evt,
         CancellationToken cancellationToken = default) => SendAsync(evt, cancellationToken);
+
+    Task<bool> PublishSupervisorAsync(
+        PrinterSupervisorSnapshot snapshot,
+        CancellationToken cancellationToken = default) => Task.FromResult(false);
 }

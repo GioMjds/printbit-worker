@@ -25,6 +25,7 @@ public sealed class PrinterHealthDiagnostic
     public int? WmiCode { get; init; }
     public string? WmiDescription { get; init; }
     public string? EpsonPopupText { get; init; }
+    public string? PortName { get; init; }
     public bool IsHealthy =>
         PrinterState == PrinterHealthState.Healthy &&
         IssueKind == PrinterHealthIssueKind.None;

@@ -20,5 +20,6 @@ public sealed class SpoolerRestartResult
 public interface IPrintSpoolerController
 {
     Task<SpoolerStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken = default);
+    Task<SpoolerRestartResult> StartAsync(CancellationToken cancellationToken = default);
     Task<SpoolerRestartResult> RestartAsync(CancellationToken cancellationToken = default);
 }

@@ -1,7 +1,7 @@
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using PrintBit.Infrastructure.Services.PrintService;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PrintBit.Shared.Configurations;
@@ -10,11 +10,6 @@ namespace PrintBit.Infrastructure.IPC;
 
 public sealed class WorkerEventPipeClient : IWorkerEventPipeClient
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        Converters = { new JsonStringEnumConverter() }
-    };
-
     private readonly ILogger<WorkerEventPipeClient> _logger;
 
     private readonly IpcSettings _settings;
@@ -31,6 +26,14 @@ public sealed class WorkerEventPipeClient : IWorkerEventPipeClient
         WorkerPrintEvent evt,
         CancellationToken cancellationToken = default) => SendAsync(evt, cancellationToken);
 
+    public Task<bool> PublishSupervisorAsync(
+        PrinterSupervisorSnapshot snapshot,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        return SendPayloadAsync(snapshot, snapshot.Type, cancellationToken);
+    }
+
     /// <summary>
     /// Sends a newline-delimited JSON event to the worker return pipe.
     /// Returns true when the payload was written and flushed; false when
@@ -38,12 +41,16 @@ public sealed class WorkerEventPipeClient : IWorkerEventPipeClient
     /// Callers can keep the event and retry on a later call. The connect
     /// timeout is sourced from <see cref="IpcSettings.ConnectTimeoutMs"/>.
     /// </summary>
-    public async Task<bool> SendAsync(
+    public Task<bool> SendAsync(
         WorkerPrintEvent evt,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(evt);
+        return SendPayloadAsync(evt, evt.Type, cancellationToken);
+    }
 
+    private async Task<bool> SendPayloadAsync<T>(T value, WorkerPrintEventType type, CancellationToken cancellationToken)
+    {
         await using var client = new NamedPipeClientStream(
             ".",
             _settings.WorkerReturnPipeName,
@@ -54,7 +61,7 @@ public sealed class WorkerEventPipeClient : IWorkerEventPipeClient
         {
             await client.ConnectAsync(_settings.ConnectTimeoutMs, cancellationToken);
 
-            var payload = JsonSerializer.Serialize(evt, JsonOptions) + "\n";
+            var payload = JsonSerializer.Serialize(value, WorkerJson.Options) + "\n";
             var bytes = Encoding.UTF8.GetBytes(payload);
 
             await client.WriteAsync(bytes, cancellationToken);
@@ -62,7 +69,7 @@ public sealed class WorkerEventPipeClient : IWorkerEventPipeClient
 
             _logger.LogInformation(
                 "[PIPE → Node] Sent {type} to {pipe}",
-                evt.Type,
+                type,
                 _settings.WorkerReturnPipeName);
 
             return true;
