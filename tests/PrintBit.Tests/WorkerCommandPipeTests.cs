@@ -608,5 +608,178 @@ public class WorkerCommandPipeTests
         await hostedServiceTask;
     }
 
+    [Fact]
+    public async Task HostedService_AcceptsSecondClientWhileFirstRequestIsStillRunning()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var pipeName = "test-concurrent-pipe-" + Guid.NewGuid().ToString("N");
+        var firstRequestStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callCount = 0;
+
+        _recoveryServiceMock
+            .Setup(r => r.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .Returns<CancellationToken>(async cancellationToken =>
+            {
+                var currentCall = Interlocked.Increment(ref callCount);
+                if (currentCall == 1)
+                {
+                    firstRequestStarted.TrySetResult();
+                    await releaseFirstRequest.Task.WaitAsync(cancellationToken);
+                }
+
+                return new PrinterRecoveryResult
+                {
+                    Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
+                    Outcome = PrinterRecoveryOutcome.Healthy,
+                    Message = "Printer is ready."
+                };
+            });
+
+        var hostedService = new WorkerCommandPipeHostedService(
+            _loggerMock.Object,
+            _recoveryServiceMock.Object,
+            Options.Create(new IpcSettings
+            {
+                WorkerCommandPipeName = pipeName,
+                MaxMessageBytes = 8192
+            }));
+
+        using var serviceCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await hostedService.StartAsync(serviceCts.Token);
+
+        var firstResponseTask = SendStatusCommandAsync(pipeName, "concurrent-1", serviceCts.Token);
+        await firstRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), serviceCts.Token);
+
+        var secondResponseTask = SendStatusCommandAsync(pipeName, "concurrent-2", serviceCts.Token);
+        var secondResponse = await secondResponseTask.WaitAsync(TimeSpan.FromSeconds(2), serviceCts.Token);
+
+        Assert.Equal("concurrent-2", secondResponse.RequestId);
+        Assert.Equal(PrinterRecoveryOutcome.Healthy, secondResponse.Outcome);
+
+        releaseFirstRequest.TrySetResult();
+        var firstResponse = await firstResponseTask.WaitAsync(TimeSpan.FromSeconds(2), serviceCts.Token);
+        Assert.Equal("concurrent-1", firstResponse.RequestId);
+
+        await hostedService.StopAsync(serviceCts.Token);
+    }
+
+    [Fact]
+    public async Task HostedService_ContinuesAfterMalformedClientRequest()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var pipeName = "test-isolated-client-pipe-" + Guid.NewGuid().ToString("N");
+        _recoveryServiceMock
+            .Setup(r => r.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PrinterRecoveryResult
+            {
+                Type = PrinterRecoveryCommandType.GetPrinterRecoveryStatus,
+                Outcome = PrinterRecoveryOutcome.Healthy,
+                Message = "Printer is ready."
+            });
+
+        var hostedService = new WorkerCommandPipeHostedService(
+            _loggerMock.Object,
+            _recoveryServiceMock.Object,
+            Options.Create(new IpcSettings { WorkerCommandPipeName = pipeName }));
+        using var serviceCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await hostedService.StartAsync(serviceCts.Token);
+
+        var malformedResponseLine = await SendRawCommandAsync(
+            pipeName,
+            "{not-json}\n",
+            serviceCts.Token);
+        var malformedResponse = JsonSerializer.Deserialize<PrinterRecoveryResult>(
+            malformedResponseLine,
+            WorkerCommandParser.JsonOptions);
+        Assert.NotNull(malformedResponse);
+        Assert.Equal(PrinterRecoveryOutcome.InvalidRequest, malformedResponse.Outcome);
+
+        var validResponse = await SendStatusCommandAsync(pipeName, "after-malformed", serviceCts.Token);
+        Assert.Equal("after-malformed", validResponse.RequestId);
+        Assert.Equal(PrinterRecoveryOutcome.Healthy, validResponse.Outcome);
+
+        await hostedService.StopAsync(serviceCts.Token);
+    }
+
+    [Fact]
+    public async Task HostedService_StopCancelsAndAwaitsActiveClientHandlers()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var pipeName = "test-shutdown-pipe-" + Guid.NewGuid().ToString("N");
+        var requestStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _recoveryServiceMock
+            .Setup(r => r.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .Returns<CancellationToken>(async cancellationToken =>
+            {
+                requestStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return new PrinterRecoveryResult();
+            });
+
+        var hostedService = new WorkerCommandPipeHostedService(
+            _loggerMock.Object,
+            _recoveryServiceMock.Object,
+            Options.Create(new IpcSettings { WorkerCommandPipeName = pipeName }));
+        await hostedService.StartAsync(CancellationToken.None);
+
+        var clientTask = SendStatusCommandAsync(pipeName, "shutdown-1", CancellationToken.None);
+        await requestStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await hostedService.StopAsync(stopCts.Token);
+        await Assert.ThrowsAnyAsync<Exception>(
+            async () => await clientTask.WaitAsync(TimeSpan.FromSeconds(1)));
+    }
+
+    private static async Task<PrinterRecoveryResult> SendStatusCommandAsync(
+        string pipeName,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        var responseLine = await SendRawCommandAsync(
+            pipeName,
+            $"{{\"requestId\":\"{requestId}\",\"type\":\"GetPrinterRecoveryStatus\"}}\n",
+            cancellationToken);
+
+        return JsonSerializer.Deserialize<PrinterRecoveryResult>(
+            responseLine,
+            WorkerCommandParser.JsonOptions)!;
+    }
+
+    private static async Task<string> SendRawCommandAsync(
+        string pipeName,
+        string request,
+        CancellationToken cancellationToken)
+    {
+        await using var client = new NamedPipeClientStream(
+            ".",
+            pipeName,
+            PipeDirection.InOut,
+            PipeOptions.Asynchronous);
+        await client.ConnectAsync(3000, cancellationToken);
+
+        var requestBytes = Encoding.UTF8.GetBytes(request);
+        await client.WriteAsync(requestBytes, cancellationToken);
+        await client.FlushAsync(cancellationToken);
+
+        using var reader = new StreamReader(client, Encoding.UTF8, leaveOpen: true);
+        var responseLine = await reader.ReadLineAsync(cancellationToken);
+        Assert.False(string.IsNullOrWhiteSpace(responseLine));
+        return responseLine;
+    }
+
     #endregion
 }

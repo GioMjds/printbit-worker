@@ -44,105 +44,204 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation(
-            "Worker command pipe listener starting on {pipe}",
-            _settings.WorkerCommandPipeName);
-
-        while (!stoppingToken.IsCancellationRequested)
+        if (_settings.WorkerCommandMaxConcurrency is < 1 or > 16)
         {
-            try
-            {
-                await using var server = WorkerCommandPipeSecurity.CreateServerStream(
-                    _settings.WorkerCommandPipeName,
-                    maxNumberOfServerInstances: 1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+            throw new InvalidOperationException(
+                $"WorkerCommandMaxConcurrency must be between 1 and 16; configured value was {_settings.WorkerCommandMaxConcurrency}.");
+        }
 
+        _logger.LogInformation(
+            "Worker command pipe listener starting on {pipe} with concurrency {maxConcurrency}",
+            _settings.WorkerCommandPipeName,
+            _settings.WorkerCommandMaxConcurrency);
+
+        using var handlerSlots = new SemaphoreSlim(
+            _settings.WorkerCommandMaxConcurrency,
+            _settings.WorkerCommandMaxConcurrency);
+        var activeHandlers = new HashSet<Task>();
+        var handlersLock = new object();
+        NamedPipeServerStream? listeningServer = null;
+
+        try
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
                 try
                 {
-                    await server.WaitForConnectionAsync(stoppingToken);
+                    listeningServer ??= CreateListeningServer();
+                    await listeningServer.WaitForConnectionAsync(stoppingToken);
+
+                    var connectedServer = listeningServer;
+                    listeningServer = CreateListeningServer();
+                    await handlerSlots.WaitAsync(stoppingToken);
+
+                    var handler = HandleConnectedClientAsync(
+                        connectedServer,
+                        handlerSlots,
+                        stoppingToken);
+                    TrackHandler(handler, activeHandlers, handlersLock);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
                     break;
                 }
-
-                _logger.LogInformation("Worker command pipe client connected");
-
-                try
+                catch (UnauthorizedAccessException ex)
                 {
-                    await ProcessRequestAsync(server, server, stoppingToken);
+                    _logger.LogWarning(
+                        ex,
+                        "Worker command pipe at {pipe} is already in use or access was denied. Retrying in 5 seconds...",
+                        _settings.WorkerCommandPipeName);
 
-                    if (server.IsConnected && OperatingSystem.IsWindows())
-                    {
-                        try
-                        {
-                            using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                            drainCts.CancelAfter(TimeSpan.FromSeconds(2));
-                            await Task.Run(server.WaitForPipeDrain, drainCts.Token);
-                        }
-                        catch (Exception)
-                        {
-                            // Drain timeout or client already disconnected; proceed to disconnect
-                        }
-                    }
+                    listeningServer?.Dispose();
+                    listeningServer = null;
+                    await DelayAfterListenerFailureAsync(TimeSpan.FromSeconds(5), stoppingToken);
                 }
-                catch (IOException ex)
+                catch (Exception ex)
                 {
-                    _logger.LogInformation(
-                        "Worker command pipe client disconnected on {pipe}: {message}",
-                        _settings.WorkerCommandPipeName,
-                        ex.Message);
+                    _logger.LogError(
+                        ex,
+                        "Unexpected error in worker command pipe listener on {pipe}. Retrying in 1 second...",
+                        _settings.WorkerCommandPipeName);
+
+                    listeningServer?.Dispose();
+                    listeningServer = null;
+                    await DelayAfterListenerFailureAsync(TimeSpan.FromSeconds(1), stoppingToken);
                 }
-                finally
-                {
-                    if (server.IsConnected)
-                    {
-                        server.Disconnect();
-                    }
-                }
+            }
+        }
+        finally
+        {
+            listeningServer?.Dispose();
+
+            Task[] handlers;
+            lock (handlersLock)
+            {
+                handlers = activeHandlers.ToArray();
+            }
+
+            try
+            {
+                await Task.WhenAll(handlers);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                break;
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Worker command pipe at {pipe} is already in use or access was denied. Retrying in 5 seconds...",
-                    _settings.WorkerCommandPipeName);
-
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(
-                    ex,
-                    "Unexpected error in worker command pipe listener on {pipe}. Retrying in 1 second...",
-                    _settings.WorkerCommandPipeName);
-
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
+                // Normal host shutdown.
             }
         }
 
         _logger.LogInformation(
             "Worker command pipe listener stopped on {pipe}",
             _settings.WorkerCommandPipeName);
+    }
+
+    private NamedPipeServerStream CreateListeningServer()
+    {
+        return WorkerCommandPipeSecurity.CreateServerStream(
+            _settings.WorkerCommandPipeName,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+    }
+
+    private async Task HandleConnectedClientAsync(
+        NamedPipeServerStream server,
+        SemaphoreSlim handlerSlots,
+        CancellationToken stoppingToken)
+    {
+        await using (server)
+        {
+            _logger.LogInformation("Worker command pipe client connected");
+
+            try
+            {
+                await ProcessRequestAsync(server, server, stoppingToken);
+
+                if (server.IsConnected && OperatingSystem.IsWindows())
+                {
+                    try
+                    {
+                        using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                        drainCts.CancelAfter(TimeSpan.FromSeconds(2));
+                        await Task.Run(server.WaitForPipeDrain, drainCts.Token);
+                    }
+                    catch (Exception)
+                    {
+                        // Drain timeout or client already disconnected; proceed to disconnect.
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // Normal host shutdown.
+            }
+            catch (IOException ex)
+            {
+                _logger.LogInformation(
+                    "Worker command pipe client disconnected on {pipe}: {message}",
+                    _settings.WorkerCommandPipeName,
+                    ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Unexpected error handling worker command pipe client on {pipe}",
+                    _settings.WorkerCommandPipeName);
+            }
+            finally
+            {
+                if (server.IsConnected)
+                {
+                    try
+                    {
+                        server.Disconnect();
+                    }
+                    catch (IOException)
+                    {
+                        // Client disconnected between the connected check and disconnect.
+                    }
+                }
+
+                handlerSlots.Release();
+            }
+        }
+    }
+
+    private static void TrackHandler(
+        Task handler,
+        HashSet<Task> activeHandlers,
+        object handlersLock)
+    {
+        lock (handlersLock)
+        {
+            activeHandlers.Add(handler);
+        }
+
+        _ = handler.ContinueWith(
+            completedHandler =>
+            {
+                lock (handlersLock)
+                {
+                    activeHandlers.Remove(completedHandler);
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private static async Task DelayAfterListenerFailureAsync(
+        TimeSpan delay,
+        CancellationToken stoppingToken)
+    {
+        try
+        {
+            await Task.Delay(delay, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal host shutdown.
+        }
     }
 
     public async Task<PrinterRecoveryResult?> ProcessRequestAsync(
