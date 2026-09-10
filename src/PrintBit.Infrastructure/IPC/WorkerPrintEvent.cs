@@ -109,4 +109,8 @@ public sealed record WorkerPrintEvent
 
     [JsonPropertyName("requestId")]
     public string? RequestId { get; init; }
+
+    [JsonPropertyName("usbDrive")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WorkerUsbDrive? UsbDrive { get; init; }
 }

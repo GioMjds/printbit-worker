@@ -19,6 +19,8 @@ public enum WorkerPrintEventType
     ScanStarted = 14,
     ScanProgress = 15,
     ScanCompleted = 16,
-    ScanFailed = 17
+    ScanFailed = 17,
+    UsbInserted = 18,
+    UsbRemoved = 19
 }
 

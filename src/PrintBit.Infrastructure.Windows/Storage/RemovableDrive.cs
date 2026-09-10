@@ -1,10 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace PrintBit.Infrastructure.Windows.Storage;
 
-namespace PrintBit.Infrastructure.Windows.Storage
-{
-    internal class RemovableDrive
-    {
-    }
-}
+public sealed record RemovableDrive(string Drive, string? Label, long FreeBytes, long TotalBytes);

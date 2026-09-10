@@ -1,10 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace PrintBit.Infrastructure.Windows.Storage;
 
-namespace PrintBit.Infrastructure.Windows.Storage
-{
-    internal class UsbExportResult
-    {
-    }
-}
+public sealed record UsbExportResult(bool Success, string? ExportPath, string? Drive, string? ErrorCode, string? Message);

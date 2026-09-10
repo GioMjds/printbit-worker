@@ -1,10 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
-namespace PrintBit.Infrastructure.Windows.Storage
+namespace PrintBit.Infrastructure.Windows.Storage;
+
+public interface IUsbStorageService
 {
-    internal class IUsbStorageService
-    {
-    }
+    Task<IReadOnlyList<RemovableDrive>> ListRemovableAsync(CancellationToken cancellationToken);
+    Task<UsbExportResult> ExportAsync(string sourcePath, string drive, CancellationToken cancellationToken);
 }
