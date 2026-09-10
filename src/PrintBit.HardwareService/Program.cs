@@ -11,6 +11,10 @@ using PrintBit.Infrastructure.Services.SerialService;
 using PrintBit.Infrastructure.Windows.PowerMonitoring;
 using PrintBit.Infrastructure.Windows.PrinterMonitoring;
 using PrintBit.Infrastructure.Windows.Scanning;
+using PrintBit.Infrastructure.Windows.Networking;
+using PrintBit.Infrastructure.Windows.Security;
+using PrintBit.Infrastructure.Windows.Storage;
+using PrintBit.Infrastructure.Windows.Time;
 using PrintBit.Shared.Configurations;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -73,8 +77,14 @@ builder.Services.AddSingleton<ICoinAcceptor, CoinAcceptorDevice>();
 builder.Services.AddSingleton<IHopper, HopperDevice>();
 builder.Services.AddSingleton<HardwareOrchestrator>();
 builder.Services.AddSingleton<IHardwareOrchestrator>(sp => sp.GetRequiredService<HardwareOrchestrator>());
-
 builder.Services.AddSingleton<IScannerService, Naps2ScannerService>();
+builder.Services.AddSingleton<IAntivirusScanner, WindowsDefenderScanner>();
+builder.Services.AddSingleton<UsbDriveMonitor>();
+builder.Services.AddSingleton<IUsbStorageService>(sp => sp.GetRequiredService<UsbDriveMonitor>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<UsbDriveMonitor>());
+builder.Services.AddSingleton<ITrustedTimeProvider, WindowsTrustedTimeProvider>();
+builder.Services.AddSingleton<IKioskNetworkPlatform, WindowsKioskNetworkPlatform>();
+builder.Services.AddSingleton<WorkerPlatformCommandHandler>();
 
 var host = builder.Build();
 

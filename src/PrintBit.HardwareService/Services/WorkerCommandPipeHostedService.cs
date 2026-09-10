@@ -20,6 +20,7 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
     private readonly IWorkerEventPipeClient? _eventPipeClient;
     private readonly bool _enableCoinSimulation;
     private readonly IScannerService? _scannerService;
+    private readonly WorkerPlatformCommandHandler? _platformCommandHandler;
 
     public WorkerCommandPipeHostedService(
         ILogger<WorkerCommandPipeHostedService> logger,
@@ -28,7 +29,8 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
         IHardwareOrchestrator? hardwareOrchestrator = null,
         IWorkerEventPipeClient? eventPipeClient = null,
         IOptions<HardwareSettings>? hardwareSettings = null,
-        IScannerService? scannerService = null)
+        IScannerService? scannerService = null,
+        WorkerPlatformCommandHandler? platformCommandHandler = null)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _recoveryService = recoveryService ?? throw new ArgumentNullException(nameof(recoveryService));
@@ -37,6 +39,7 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
         _eventPipeClient = eventPipeClient;
         _enableCoinSimulation = hardwareSettings?.Value.EnableCoinSimulation ?? false;
         _scannerService = scannerService;
+        _platformCommandHandler = platformCommandHandler;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -241,7 +244,47 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
                 return null;
             }
 
-            if (_hardwareOrchestrator == null)
+                if (hwCommand is GetDefenderHealthCommand or
+                        ScanFileSecurityCommand or
+                        ListUsbDrivesCommand or
+                        ExportScanToUsbCommand or
+                        GetTrustedTimeStatusCommand or
+                        PrepareHotspotPlatformCommand)
+                {
+                    if (_platformCommandHandler == null)
+                    {
+                        sw.Stop();
+                        var unavailableResponse = new HardwareErrorResponse
+                        {
+                            RequestId = hwCommand.RequestId,
+                            Type = peekType,
+                            Success = false,
+                            ErrorCode = "PLATFORM_HANDLER_UNAVAILABLE",
+                            Message = "Platform command handler is not configured or available."
+                        };
+
+                        var unavailJson = JsonSerializer.Serialize(unavailableResponse, WorkerCommandParser.JsonOptions) + "\n";
+                        await outputStream.WriteAsync(Encoding.UTF8.GetBytes(unavailJson), cancellationToken);
+                        await outputStream.FlushAsync(cancellationToken);
+                        return null;
+                    }
+
+                    var platformResponse = await _platformCommandHandler.HandleAsync(hwCommand, cancellationToken);
+                    sw.Stop();
+
+                    _logger.LogInformation(
+                        "Executed platform worker command | Type={type} RequestId={requestId} ElapsedMs={elapsedMs}",
+                        peekType,
+                        hwCommand.RequestId,
+                        sw.ElapsedMilliseconds);
+
+                    var platformJson = JsonSerializer.Serialize(platformResponse, WorkerCommandParser.JsonOptions) + "\n";
+                    await outputStream.WriteAsync(Encoding.UTF8.GetBytes(platformJson), cancellationToken);
+                    await outputStream.FlushAsync(cancellationToken);
+                    return null;
+                }
+
+                if (_hardwareOrchestrator == null)
             {
                 sw.Stop();
                 var unavailableResponse = new HardwareErrorResponse

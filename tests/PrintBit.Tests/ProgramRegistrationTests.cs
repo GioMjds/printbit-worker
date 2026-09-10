@@ -14,10 +14,15 @@ using PrintBit.Hardware.Devices.CoinAcceptor;
 using PrintBit.Hardware.Devices.ESP32;
 using PrintBit.Hardware.Devices.Hopper;
 using PrintBit.HardwareService.Services;
+using PrintBit.Infrastructure.IPC;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Infrastructure.Services.SerialService;
+using PrintBit.Infrastructure.Windows.Networking;
 using PrintBit.Infrastructure.Windows.PowerMonitoring;
 using PrintBit.Infrastructure.Windows.PrinterMonitoring;
+using PrintBit.Infrastructure.Windows.Security;
+using PrintBit.Infrastructure.Windows.Storage;
+using PrintBit.Infrastructure.Windows.Time;
 using PrintBit.Shared.Configurations;
 using Xunit;
 
@@ -292,6 +297,55 @@ public class ProgramRegistrationTests
         Assert.Contains("builder.Services.AddSingleton<IHopper, HopperDevice>();", content);
         Assert.Contains("builder.Services.AddSingleton<HardwareOrchestrator>();", content);
         Assert.Contains("builder.Services.AddSingleton<IHardwareOrchestrator>(sp => sp.GetRequiredService<HardwareOrchestrator>());", content);
+    }
+
+    [Fact]
+    public void ProgramCs_RegistersAllPhase4PlatformServices()
+    {
+        var programCsPath = Path.Combine(GetSolutionRoot(), "src", "PrintBit.HardwareService", "Program.cs");
+        Assert.True(File.Exists(programCsPath), $"Expected Program.cs to exist at {programCsPath}");
+
+        var content = File.ReadAllText(programCsPath);
+
+        Assert.Contains("builder.Services.AddSingleton<IAntivirusScanner, WindowsDefenderScanner>();", content);
+        Assert.Contains("builder.Services.AddSingleton<UsbDriveMonitor>();", content);
+        Assert.Contains("builder.Services.AddSingleton<IUsbStorageService>(sp => sp.GetRequiredService<UsbDriveMonitor>());", content);
+        Assert.Contains("builder.Services.AddHostedService(sp => sp.GetRequiredService<UsbDriveMonitor>());", content);
+        Assert.Contains("builder.Services.AddSingleton<ITrustedTimeProvider, WindowsTrustedTimeProvider>();", content);
+        Assert.Contains("builder.Services.AddSingleton<IKioskNetworkPlatform, WindowsKioskNetworkPlatform>();", content);
+        Assert.Contains("builder.Services.AddSingleton<WorkerPlatformCommandHandler>();", content);
+    }
+
+    [Fact]
+    public void ServiceCollection_ResolvesPhase4PlatformServicesAndSameUsbMonitorInstance()
+    {
+        var services = new ServiceCollection();
+
+        services.AddLogging();
+        services.AddSingleton<IAntivirusScanner, WindowsDefenderScanner>();
+        services.AddSingleton<UsbDriveMonitor>();
+        services.AddSingleton<IUsbStorageService>(sp => sp.GetRequiredService<UsbDriveMonitor>());
+        services.AddHostedService(sp => sp.GetRequiredService<UsbDriveMonitor>());
+        services.AddSingleton<ITrustedTimeProvider, WindowsTrustedTimeProvider>();
+        services.AddSingleton<IKioskNetworkPlatform, WindowsKioskNetworkPlatform>();
+        services.AddSingleton<IWorkerEventPipeClient>(new Mock<IWorkerEventPipeClient>().Object);
+        services.AddSingleton<WorkerPlatformCommandHandler>();
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.NotNull(provider.GetRequiredService<IAntivirusScanner>());
+        Assert.NotNull(provider.GetRequiredService<ITrustedTimeProvider>());
+        Assert.NotNull(provider.GetRequiredService<IKioskNetworkPlatform>());
+        Assert.NotNull(provider.GetRequiredService<WorkerPlatformCommandHandler>());
+
+        var usbService = provider.GetRequiredService<IUsbStorageService>();
+        var usbMonitor = provider.GetRequiredService<UsbDriveMonitor>();
+        var hostedMonitors = provider.GetServices<IHostedService>().OfType<UsbDriveMonitor>().ToList();
+
+        Assert.NotNull(usbService);
+        Assert.Same(usbMonitor, usbService);
+        Assert.Single(hostedMonitors);
+        Assert.Same(usbMonitor, hostedMonitors[0]);
     }
 }
 
