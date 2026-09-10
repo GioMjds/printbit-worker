@@ -1,10 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+namespace PrintBit.Infrastructure.Windows.Security;
 
-namespace PrintBit.Infrastructure.Windows.Security
-{
-    internal class DefenderScanResult
-    {
-    }
-}
+public sealed record DefenderScanResult(string Status, string? DetectionName, string? Detail, string? ErrorCode);

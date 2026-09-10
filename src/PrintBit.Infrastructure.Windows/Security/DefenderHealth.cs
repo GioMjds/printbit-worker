@@ -1,10 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+namespace PrintBit.Infrastructure.Windows.Security;
 
-namespace PrintBit.Infrastructure.Windows.Security
-{
-    internal class DefenderHealth
-    {
-    }
-}
+public sealed record DefenderHealth(string Status, double? SignatureAgeHours, string? Detail, string? ErrorCode);
