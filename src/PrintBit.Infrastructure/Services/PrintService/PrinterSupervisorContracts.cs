@@ -5,6 +5,13 @@ using PrintBit.Infrastructure.IPC;
 
 namespace PrintBit.Infrastructure.Services.PrintService;
 
+public enum SupervisorDecision
+{
+    None,
+    StartSpooler,
+    RestartSpooler
+}
+
 public enum PrinterSupervisorState
 {
     Starting,

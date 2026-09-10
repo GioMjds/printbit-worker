@@ -13,6 +13,39 @@ namespace PrintBit.Tests;
 
 public class PrinterRecoveryServiceTests
 {
+    [Theory]
+    [InlineData(SupervisorDecision.StartSpooler, false)]
+    [InlineData(SupervisorDecision.RestartSpooler, true)]
+    public async Task ExplicitDecisionPhysicalFaultNeverStartsOrRestarts(SupervisorDecision decision, bool running)
+    {
+        _healthMonitorMock.Setup(h => h.GetDiagnostic(It.IsAny<string>())).Returns(new PrinterHealthDiagnostic
+        {
+            PrinterState = PrinterHealthState.Fault, IssueKind = PrinterHealthIssueKind.PhysicalFault
+        });
+        _spoolerControllerMock.Setup(s => s.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpoolerStatusSnapshot { IsRunning = running, Status = running ? "Running" : "Stopped" });
+        var result = await CreateService().AttemptRepairAsync(decision, CancellationToken.None);
+        Assert.Equal(PrinterRecoveryOutcome.ManualInterventionRequired, result.Outcome);
+        _spoolerControllerMock.Verify(s => s.StartAsync(It.IsAny<CancellationToken>()), Times.Never);
+        _spoolerControllerMock.Verify(s => s.RestartAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task StartFailureReportsStartActionWithoutClaimingRestart()
+    {
+        _healthMonitorMock.Setup(h => h.GetDiagnostic(It.IsAny<string>())).Returns(new PrinterHealthDiagnostic
+        {
+            PrinterState = PrinterHealthState.Unavailable, IssueKind = PrinterHealthIssueKind.WindowsQueueFault
+        });
+        _spoolerControllerMock.Setup(s => s.GetStatusAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpoolerStatusSnapshot { Status = "Stopped" });
+        _spoolerControllerMock.Setup(s => s.StartAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SpoolerRestartResult { Success = false, FinalStatus = "Stopped", Error = "denied" });
+        var result = await CreateService().AttemptRepairAsync(SupervisorDecision.StartSpooler, CancellationToken.None);
+        Assert.Equal("StartSpooler", result.Action);
+        Assert.DoesNotContain("restart", result.Message!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("denied", result.Message);
+    }
     private readonly Mock<IPrinterHealthMonitor> _healthMonitorMock;
     private readonly Mock<IPrintSpoolerController> _spoolerControllerMock;
     private readonly Mock<IPrinterOperationCoordinator> _coordinatorMock;
@@ -238,6 +271,7 @@ public class PrinterRecoveryServiceTests
 
         Assert.Equal(PrinterRecoveryOutcome.Recovered, result.Outcome);
         Assert.Equal("StartSpooler", result.Action);
+        Assert.DoesNotContain("restart", result.Message!, StringComparison.OrdinalIgnoreCase);
         _spoolerControllerMock.Verify(s => s.StartAsync(It.IsAny<CancellationToken>()), Times.Once);
         _spoolerControllerMock.Verify(s => s.RestartAsync(It.IsAny<CancellationToken>()), Times.Never);
     }

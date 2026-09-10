@@ -5,13 +5,6 @@ using PrintBit.Shared.Configurations;
 
 namespace PrintBit.Infrastructure.Windows.PrinterMonitoring;
 
-public enum SupervisorDecision
-{
-    None,
-    StartSpooler,
-    RestartSpooler
-}
-
 public sealed record SupervisorObservation(
     SpoolerStatusSnapshot Spooler,
     PrinterHealthDiagnostic Printer,
@@ -46,6 +39,7 @@ public sealed class PrinterSupervisorStateMachine
     }
 
     public PrinterSupervisorState State { get; private set; } = PrinterSupervisorState.Starting;
+    public bool IsCircuitOpen => _circuitOpen;
 
     public SupervisorTransition Observe(SupervisorObservation observation)
     {
@@ -142,6 +136,24 @@ public sealed class PrinterSupervisorStateMachine
         return true;
     }
 
+    public bool BeginManualRecovery(PrinterOperationKind activeOperation)
+    {
+        if (_circuitOpen) return BeginManualHalfOpen(activeOperation);
+        if (_recoveryOutstanding || activeOperation != PrinterOperationKind.None) return false;
+        State = PrinterSupervisorState.Recovering;
+        _healthySamples = 0;
+        _recoveryOutstanding = true;
+        return true;
+    }
+
+    // A lease race or changed diagnostic is a deferral, not a failed repair attempt.
+    public SupervisorTransition DeferRecovery()
+    {
+        _recoveryOutstanding = false;
+        _manualHalfOpen = false;
+        return TransitionTo(_circuitOpen ? PrinterSupervisorState.CircuitOpen : PrinterSupervisorState.Maintenance);
+    }
+
     private SupervisorTransition ObserveHealthy(PrinterOperationKind activeOperation)
     {
         _unhealthySamples = 0;
@@ -173,6 +185,15 @@ public sealed class PrinterSupervisorStateMachine
         if (observation.ActiveOperation == PrinterOperationKind.Recovery)
         {
             return TransitionTo(PrinterSupervisorState.Recovering);
+        }
+
+        if (!string.IsNullOrEmpty(observation.Spooler.ErrorMessage) ||
+            (observation.Spooler.IsRunning
+                ? observation.Printer.IssueKind != PrinterHealthIssueKind.WindowsQueueFault
+                : !string.Equals(observation.Spooler.Status, "Stopped", StringComparison.OrdinalIgnoreCase)))
+        {
+            _unhealthySamples = 0;
+            return TransitionTo(PrinterSupervisorState.Maintenance);
         }
 
         if (_unhealthySamples < _settings.UnhealthySamplesBeforeRecovery)
