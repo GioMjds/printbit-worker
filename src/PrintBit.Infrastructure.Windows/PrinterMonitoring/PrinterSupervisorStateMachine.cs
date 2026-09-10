@@ -28,7 +28,10 @@ public sealed class PrinterSupervisorStateMachine
     private readonly PrinterRecoverySettings _settings;
     private readonly ISystemClock _clock;
     private readonly List<DateTime> _failedRecoveryAttempts = [];
+    private bool _circuitOpen;
     private int _healthySamples;
+    private bool _manualHalfOpen;
+    private bool _recoveryOutstanding;
     private int _unhealthySamples;
 
     public PrinterSupervisorStateMachine(PrinterRecoverySettings settings, ISystemClock clock)
@@ -59,6 +62,16 @@ public sealed class PrinterSupervisorStateMachine
             return TransitionTo(PrinterSupervisorState.Maintenance);
         }
 
+        if (_circuitOpen && !_manualHalfOpen)
+        {
+            return TransitionTo(PrinterSupervisorState.CircuitOpen);
+        }
+
+        if (_recoveryOutstanding)
+        {
+            return CurrentTransition();
+        }
+
         if (IsHealthy(observation))
         {
             return ObserveHealthy(observation.ActiveOperation);
@@ -71,38 +84,60 @@ public sealed class PrinterSupervisorStateMachine
     {
         PruneFailedRecoveryAttempts();
 
-        if (State != PrinterSupervisorState.Recovering)
+        if (!_recoveryOutstanding)
         {
             return CurrentTransition();
         }
 
+        var wasManualHalfOpen = _manualHalfOpen;
+        _manualHalfOpen = false;
+        _recoveryOutstanding = false;
         _unhealthySamples = 0;
 
         if (succeeded)
         {
-            _failedRecoveryAttempts.Clear();
+            if (wasManualHalfOpen)
+            {
+                _circuitOpen = false;
+                _failedRecoveryAttempts.Clear();
+            }
+
             _healthySamples = 1;
             return TransitionTo(PrinterSupervisorState.Starting);
         }
 
         _healthySamples = 0;
+
+        if (wasManualHalfOpen)
+        {
+            _circuitOpen = true;
+            return TransitionTo(PrinterSupervisorState.CircuitOpen);
+        }
+
         _failedRecoveryAttempts.Add(_clock.UtcNow);
         PruneFailedRecoveryAttempts();
 
-        return _failedRecoveryAttempts.Count >= _settings.CircuitBreakerFailureLimit
-            ? TransitionTo(PrinterSupervisorState.CircuitOpen)
-            : TransitionTo(PrinterSupervisorState.Starting);
+        if (_failedRecoveryAttempts.Count >= _settings.CircuitBreakerFailureLimit)
+        {
+            _circuitOpen = true;
+            return TransitionTo(PrinterSupervisorState.CircuitOpen);
+        }
+
+        return TransitionTo(PrinterSupervisorState.Maintenance);
     }
 
     public bool BeginManualHalfOpen(PrinterOperationKind activeOperation)
     {
-        if (State != PrinterSupervisorState.CircuitOpen || activeOperation != PrinterOperationKind.None)
+        if (!_circuitOpen || State != PrinterSupervisorState.CircuitOpen ||
+            _recoveryOutstanding || activeOperation != PrinterOperationKind.None)
         {
             return false;
         }
 
         State = PrinterSupervisorState.Recovering;
         _healthySamples = 0;
+        _manualHalfOpen = true;
+        _recoveryOutstanding = true;
         _unhealthySamples = 0;
         return true;
     }
@@ -111,21 +146,11 @@ public sealed class PrinterSupervisorStateMachine
     {
         _unhealthySamples = 0;
 
-        if (State == PrinterSupervisorState.CircuitOpen)
-        {
-            return CurrentTransition();
-        }
-
         if (activeOperation != PrinterOperationKind.None)
         {
             return TransitionTo(activeOperation == PrinterOperationKind.Print
                 ? PrinterSupervisorState.Busy
                 : PrinterSupervisorState.Recovering);
-        }
-
-        if (State == PrinterSupervisorState.Recovering)
-        {
-            return CurrentTransition();
         }
 
         _healthySamples++;
@@ -137,11 +162,6 @@ public sealed class PrinterSupervisorStateMachine
     private SupervisorTransition ObserveUnhealthy(SupervisorObservation observation)
     {
         _healthySamples = 0;
-
-        if (State == PrinterSupervisorState.CircuitOpen || State == PrinterSupervisorState.Recovering)
-        {
-            return CurrentTransition();
-        }
 
         _unhealthySamples++;
 
@@ -163,6 +183,7 @@ public sealed class PrinterSupervisorStateMachine
         var decision = observation.Spooler.IsRunning
             ? SupervisorDecision.RestartSpooler
             : SupervisorDecision.StartSpooler;
+        _recoveryOutstanding = true;
         return TransitionTo(PrinterSupervisorState.Recovering, decision);
     }
 
@@ -184,6 +205,6 @@ public sealed class PrinterSupervisorStateMachine
     private void PruneFailedRecoveryAttempts()
     {
         var cutoff = _clock.UtcNow.AddMinutes(-_settings.CircuitBreakerWindowMinutes);
-        _failedRecoveryAttempts.RemoveAll(attempt => attempt <= cutoff);
+        _failedRecoveryAttempts.RemoveAll(attempt => attempt < cutoff);
     }
 }

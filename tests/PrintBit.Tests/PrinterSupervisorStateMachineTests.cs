@@ -111,15 +111,107 @@ public class PrinterSupervisorStateMachineTests
 
         Assert.Equal(PrinterSupervisorState.CircuitOpen, transition.State);
         Assert.Equal(SupervisorDecision.None, transition.Decision);
-        Assert.Equal(4, transition.AttemptsInWindow);
+        Assert.Equal(3, transition.AttemptsInWindow);
+    }
+
+    [Fact]
+    public void FailedManualHalfOpen_AfterAutomaticFailuresAgeOut_KeepsCircuitOpenWithoutRecordingAutomaticFailure()
+    {
+        var clock = new MutableSystemClock(new DateTime(2026, 9, 9, 0, 0, 0, DateTimeKind.Utc));
+        var machine = CreateOpenCircuitMachine(clock);
+        clock.UtcNow = clock.UtcNow.AddMinutes(11);
+
+        Assert.True(machine.BeginManualHalfOpen(PrinterOperationKind.None));
+        var transition = machine.CompleteRecovery(false);
+
+        Assert.Equal(PrinterSupervisorState.CircuitOpen, transition.State);
+        Assert.Equal(0, transition.AttemptsInWindow);
+    }
+
+    [Fact]
+    public void PhysicalFaultDuringOpenCircuit_PreservesLatchAndBlocksLaterAutomaticRecovery()
+    {
+        var machine = CreateOpenCircuitMachine();
+
+        var maintenance = machine.Observe(PhysicalFault());
+        var afterFaultClears = machine.Observe(Healthy());
+        var windowsFault = machine.Observe(WindowsQueueFault());
+
+        Assert.Equal(PrinterSupervisorState.Maintenance, maintenance.State);
+        Assert.Equal(SupervisorDecision.None, maintenance.Decision);
+        Assert.Equal(PrinterSupervisorState.CircuitOpen, afterFaultClears.State);
+        Assert.Equal(SupervisorDecision.None, afterFaultClears.Decision);
+        Assert.Equal(PrinterSupervisorState.CircuitOpen, windowsFault.State);
+        Assert.Equal(SupervisorDecision.None, windowsFault.Decision);
+    }
+
+    [Fact]
+    public void SuccessfulAutomaticRecovery_PreservesPriorFailureHistory()
+    {
+        var machine = CreateMachine();
+
+        FailAutomaticRecovery(machine);
+        RequestAutomaticRecovery(machine);
+        var success = machine.CompleteRecovery(true);
+        var nextFailure = FailAutomaticRecovery(machine);
+
+        Assert.Equal(PrinterSupervisorState.Starting, success.State);
+        Assert.Equal(1, success.AttemptsInWindow);
+        Assert.Equal(PrinterSupervisorState.Maintenance, nextFailure.State);
+        Assert.Equal(2, nextFailure.AttemptsInWindow);
+    }
+
+    [Fact]
+    public void InterveningObservations_DoNotDiscardOutstandingRecoveryCompletion()
+    {
+        var machine = CreateMachine();
+
+        RequestAutomaticRecovery(machine);
+        var duplicate = machine.Observe(WindowsQueueFault());
+        machine.Observe(PhysicalFault());
+        var completion = machine.CompleteRecovery(false);
+        var duplicateCompletion = machine.CompleteRecovery(false);
+
+        Assert.Equal(SupervisorDecision.None, duplicate.Decision);
+        Assert.Equal(PrinterSupervisorState.Maintenance, completion.State);
+        Assert.Equal(1, completion.AttemptsInWindow);
+        Assert.Equal(1, duplicateCompletion.AttemptsInWindow);
+    }
+
+    [Fact]
+    public void FailedAutomaticRecovery_BelowCircuitThreshold_EntersMaintenanceAndCanResample()
+    {
+        var machine = CreateMachine();
+
+        RequestAutomaticRecovery(machine);
+        var failed = machine.CompleteRecovery(false);
+        machine.Observe(WindowsQueueFault());
+        var retry = machine.Observe(WindowsQueueFault());
+
+        Assert.Equal(PrinterSupervisorState.Maintenance, failed.State);
+        Assert.Equal(SupervisorDecision.RestartSpooler, retry.Decision);
+        Assert.Equal(PrinterSupervisorState.Recovering, retry.State);
+    }
+
+    [Fact]
+    public void FailureAtRollingWindowCutoff_IsRetained()
+    {
+        var clock = new MutableSystemClock(new DateTime(2026, 9, 9, 0, 0, 0, DateTimeKind.Utc));
+        var machine = CreateMachine(clock);
+
+        FailAutomaticRecovery(machine);
+        clock.UtcNow = clock.UtcNow.AddMinutes(10);
+        var transition = FailAutomaticRecovery(machine);
+
+        Assert.Equal(2, transition.AttemptsInWindow);
     }
 
     private static PrinterSupervisorStateMachine CreateMachine(MutableSystemClock? clock = null) =>
         new(new PrinterRecoverySettings(), clock ?? new MutableSystemClock(DateTime.UtcNow));
 
-    private static PrinterSupervisorStateMachine CreateOpenCircuitMachine()
+    private static PrinterSupervisorStateMachine CreateOpenCircuitMachine(MutableSystemClock? clock = null)
     {
-        var machine = CreateMachine();
+        var machine = CreateMachine(clock);
         FailAutomaticRecovery(machine);
         FailAutomaticRecovery(machine);
         FailAutomaticRecovery(machine);
@@ -128,9 +220,14 @@ public class PrinterSupervisorStateMachineTests
 
     private static SupervisorTransition FailAutomaticRecovery(PrinterSupervisorStateMachine machine)
     {
-        machine.Observe(WindowsQueueFault());
-        machine.Observe(WindowsQueueFault());
+        RequestAutomaticRecovery(machine);
         return machine.CompleteRecovery(false);
+    }
+
+    private static SupervisorTransition RequestAutomaticRecovery(PrinterSupervisorStateMachine machine)
+    {
+        machine.Observe(WindowsQueueFault());
+        return machine.Observe(WindowsQueueFault());
     }
 
     private static SupervisorObservation Healthy() =>
