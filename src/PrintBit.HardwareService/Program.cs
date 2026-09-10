@@ -1,4 +1,5 @@
 using PrintBit.Application.Services;
+using Microsoft.Extensions.Options;
 using PrintBit.Hardware.Devices.CoinAcceptor;
 using PrintBit.Hardware.Devices.ESP32;
 using PrintBit.Hardware.Devices.Hopper;
@@ -86,6 +87,22 @@ builder.Services.AddSingleton<ITrustedTimeProvider, WindowsTrustedTimeProvider>(
 builder.Services.AddSingleton<IKioskNetworkPlatform, WindowsKioskNetworkPlatform>();
 builder.Services.AddSingleton<WorkerPlatformCommandHandler>();
 
-var host = builder.Build();
+using var host = builder.Build();
+var startupLogger = host.Services
+    .GetRequiredService<ILoggerFactory>()
+    .CreateLogger("WorkerStartup");
+var ipcSettings = host.Services.GetRequiredService<IOptions<IpcSettings>>().Value;
+using var workerInstanceLock = WorkerInstanceLock.TryAcquire(
+    ipcSettings.WorkerInstanceLockName,
+    startupLogger);
 
-host.Run();
+if (workerInstanceLock is null)
+{
+    startupLogger.LogCritical(
+        "Another PrintBit hardware worker instance already owns {mutexName}; exiting.",
+        ipcSettings.WorkerInstanceLockName);
+    Environment.ExitCode = 2;
+    return;
+}
+
+await host.RunAsync();
