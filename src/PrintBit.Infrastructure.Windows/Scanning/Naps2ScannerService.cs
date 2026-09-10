@@ -71,7 +71,7 @@ public sealed class Naps2ScannerService : IScannerService
             return new ScannerCapabilities { Available = false };
         }
 
-        foreach (var driver in new[] { "twain", "wia" })
+        foreach (var driver in GetProbeDrivers(_settings.PreferredDriver))
         {
             var devices = await ListDevicesAsync(driver, cancellationToken);
             if (devices.Count > 0)
@@ -302,16 +302,23 @@ public sealed class Naps2ScannerService : IScannerService
             RedirectStandardError = true
         };
 
+        using var proc = new Process { StartInfo = psi };
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_settings.ProbeTimeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+        var started = false;
         try
         {
-            using var proc = Process.Start(psi);
-            if (proc == null) return [];
+            if (!proc.Start()) return [];
+            started = true;
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_settings.ProbeTimeoutSeconds));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cts.Token);
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync(linkedCts.Token);
+            var stderrTask = proc.StandardError.ReadToEndAsync(linkedCts.Token);
 
-            var stdout = await proc.StandardOutput.ReadToEndAsync(linked.Token);
-            await proc.WaitForExitAsync(linked.Token);
+            await proc.WaitForExitAsync(linkedCts.Token);
+
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
 
             if (proc.ExitCode == 0)
             {
@@ -321,13 +328,66 @@ public sealed class Naps2ScannerService : IScannerService
                     .Where(line => !string.IsNullOrWhiteSpace(line))
                     .ToList();
             }
+
+            _logger.LogWarning(
+                "[SCANNER] NAPS2 {driver} probe exited with code {code}: {error}",
+                driver,
+                proc.ExitCode,
+                stderr.Trim());
+        }
+        catch (OperationCanceledException)
+        {
+            if (started)
+            {
+                await TerminateProbeProcessAsync(proc, driver);
+            }
+
+            if (timeoutCts.IsCancellationRequested)
+            {
+                _logger.LogDebug(
+                    "[SCANNER] {driver} probe timed out after {seconds}s",
+                    driver.ToUpperInvariant(),
+                    _settings.ProbeTimeoutSeconds);
+            }
+            else
+            {
+                _logger.LogDebug("[SCANNER] {driver} probe was cancelled", driver.ToUpperInvariant());
+            }
+
+            return [];
         }
         catch (Exception ex)
         {
+            if (started)
+            {
+                await TerminateProbeProcessAsync(proc, driver);
+            }
+
             _logger.LogWarning(ex, "[SCANNER] Error probing devices for driver {driver}", driver);
         }
         return [];
     }
+
+    private async Task TerminateProbeProcessAsync(Process proc, string driver)
+    {
+        try
+        {
+            if (!proc.HasExited)
+            {
+                proc.Kill(entireProcessTree: true);
+                await proc.WaitForExitAsync(CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[SCANNER] Failed terminating {driver} probe", driver);
+        }
+    }
+
+    private static string[] GetProbeDrivers(string preferredDriver) =>
+        preferredDriver.Equals("wia", StringComparison.OrdinalIgnoreCase)
+            ? ["wia", "twain"]
+            : ["twain", "wia"];
 
     public static string? SelectPreferredDevice(IReadOnlyList<string> devices, string preferredName)
     {
@@ -356,6 +416,7 @@ public sealed class Naps2ScannerService : IScannerService
         string? paperSize)
     {
         var sb = new StringBuilder();
+        sb.Append("--noprofile ");
         sb.Append($"-o \"{outputPath}\" ");
         sb.Append($"--driver {driver} ");
         sb.Append($"--device \"{deviceName}\" ");
