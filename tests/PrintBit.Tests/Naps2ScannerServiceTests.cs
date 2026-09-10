@@ -60,22 +60,22 @@ public sealed class Naps2ScannerServiceTests : IDisposable
     [Fact]
     public void BuildNaps2Args_DisablesSavedProfiles()
     {
-        var method = typeof(Naps2ScannerService).GetMethod(
-            "BuildNaps2Args",
-            BindingFlags.NonPublic | BindingFlags.Static);
-
-        var args = (string)method!.Invoke(null,
-        [
-            @"C:\PrintBit\scan.pdf",
-            "wia",
-            "EPSON L5290 Series",
-            "glass",
-            300,
-            "color",
-            "a4"
-        ])!;
+        var args = InvokeBuildNaps2Args("glass", "A4");
 
         Assert.Contains("--noprofile", args, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("glass", "A4", "--pagesize 216x297mm")]
+    [InlineData("feeder", "A4", "--pagesize a4")]
+    [InlineData("feeder", "Letter", "--pagesize letter")]
+    [InlineData("feeder", "Legal", "--pagesize legal")]
+    public void BuildNaps2Args_UsesDeterministicPageSize(
+        string source, string paperSize, string expectedPageSize)
+    {
+        var args = InvokeBuildNaps2Args(source, paperSize);
+        Assert.Contains("--noprofile", args, StringComparison.Ordinal);
+        Assert.Contains(expectedPageSize, args, StringComparison.Ordinal);
     }
 
     public void Dispose()
@@ -97,6 +97,24 @@ public sealed class Naps2ScannerServiceTests : IDisposable
                 ProbeTimeoutSeconds = probeTimeoutSeconds,
                 EnableStubFallback = false
             }));
+
+    private static string InvokeBuildNaps2Args(string source, string paperSize)
+    {
+        var method = typeof(Naps2ScannerService).GetMethod(
+            "BuildNaps2Args",
+            BindingFlags.NonPublic | BindingFlags.Static);
+
+        return (string)method!.Invoke(null,
+        [
+            @"C:\PrintBit\scan.pdf",
+            "wia",
+            "EPSON L5290 Series",
+            source,
+            300,
+            "color",
+            paperSize
+        ])!;
+    }
 
     private string CreateNaps2Script(string content)
     {
