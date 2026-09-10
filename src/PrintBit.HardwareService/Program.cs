@@ -105,4 +105,4 @@ if (workerInstanceLock is null)
     return;
 }
 
-await host.RunAsync();
+host.Run();
