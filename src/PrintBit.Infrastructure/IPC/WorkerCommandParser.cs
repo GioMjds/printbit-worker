@@ -217,7 +217,13 @@ public static class WorkerCommandParser
                string.Equals(type, "GetScannerStatus", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(type, "ProbeScanner", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(type, "StartScan", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(type, "CancelScan", StringComparison.OrdinalIgnoreCase);
+               string.Equals(type, "CancelScan", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "GetDefenderHealth", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "ScanFileSecurity", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "ListUsbDrives", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "ExportScanToUsb", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "GetTrustedTimeStatus", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(type, "PrepareHotspotPlatform", StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool TryParseHardwareCommand(
@@ -485,6 +491,155 @@ public static class WorkerCommandParser
                 {
                     RequestId = requestId,
                     TargetRequestId = targetId
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "GetDefenderHealth", StringComparison.OrdinalIgnoreCase))
+            {
+                command = new GetDefenderHealthCommand { RequestId = requestId };
+                return true;
+            }
+            else if (string.Equals(commandType, "ScanFileSecurity", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "filePath", out var fileElem) ||
+                    fileElem.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(fileElem.GetString()))
+                {
+                    errorDetail = "FilePath is required";
+                    return false;
+                }
+
+                var filePath = fileElem.GetString()!;
+                if (!Path.IsPathFullyQualified(filePath))
+                {
+                    errorDetail = "FilePath must be an absolute path";
+                    return false;
+                }
+
+                command = new ScanFileSecurityCommand
+                {
+                    RequestId = requestId,
+                    FilePath = filePath
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "ListUsbDrives", StringComparison.OrdinalIgnoreCase))
+            {
+                command = new ListUsbDrivesCommand { RequestId = requestId };
+                return true;
+            }
+            else if (string.Equals(commandType, "ExportScanToUsb", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "sourcePath", out var srcElem) ||
+                    srcElem.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(srcElem.GetString()))
+                {
+                    errorDetail = "SourcePath is required";
+                    return false;
+                }
+
+                var sourcePath = srcElem.GetString()!;
+                if (!Path.IsPathFullyQualified(sourcePath))
+                {
+                    errorDetail = "SourcePath must be an absolute path";
+                    return false;
+                }
+
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "drive", out var driveElem) ||
+                    driveElem.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(driveElem.GetString()))
+                {
+                    errorDetail = "Drive is required";
+                    return false;
+                }
+
+                var drive = driveElem.GetString()!;
+                if (!System.Text.RegularExpressions.Regex.IsMatch(drive, "^[A-Za-z]:$"))
+                {
+                    errorDetail = "Drive must match format 'X:'";
+                    return false;
+                }
+
+                command = new ExportScanToUsbCommand
+                {
+                    RequestId = requestId,
+                    SourcePath = sourcePath,
+                    Drive = drive
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "GetTrustedTimeStatus", StringComparison.OrdinalIgnoreCase))
+            {
+                string? ntpServer = null;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "ntpServer", out var ntpElem) &&
+                    ntpElem.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(ntpElem.GetString()))
+                {
+                    ntpServer = ntpElem.GetString()!;
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(ntpServer, "^[A-Za-z0-9._:-]+$"))
+                    {
+                        errorDetail = "NtpServer contains invalid characters";
+                        return false;
+                    }
+                }
+
+                var maxDriftMs = 60_000;
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "maxDriftMs", out var driftElem) &&
+                    driftElem.ValueKind == JsonValueKind.Number)
+                {
+                    if (!driftElem.TryGetInt32(out var parsedDrift) || parsedDrift < 0)
+                    {
+                        errorDetail = "MaxDriftMs must be a non-negative integer";
+                        return false;
+                    }
+                    maxDriftMs = parsedDrift;
+                }
+
+                command = new GetTrustedTimeStatusCommand
+                {
+                    RequestId = requestId,
+                    NtpServer = ntpServer,
+                    MaxDriftMs = maxDriftMs
+                };
+                return true;
+            }
+            else if (string.Equals(commandType, "PrepareHotspotPlatform", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryGetPropertyCaseInsensitive(doc.RootElement, "port", out var portElem) ||
+                    portElem.ValueKind != JsonValueKind.Number ||
+                    !portElem.TryGetInt32(out var port) ||
+                    port is <= 0 or > 65535)
+                {
+                    errorDetail = "Port is required and must be between 1 and 65535";
+                    return false;
+                }
+
+                var prefixes = new List<string>();
+                if (TryGetPropertyCaseInsensitive(doc.RootElement, "preferredSubnetPrefixes", out var prefixElem) &&
+                    prefixElem.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in prefixElem.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()))
+                        {
+                            errorDetail = "PreferredSubnetPrefixes must contain non-empty strings";
+                            return false;
+                        }
+                        var p = item.GetString()!;
+                        if (!System.Text.RegularExpressions.Regex.IsMatch(p, @"^(?:\d{1,3}\.){1,3}$"))
+                        {
+                            errorDetail = $"PreferredSubnetPrefix '{p}' has invalid format";
+                            return false;
+                        }
+                        prefixes.Add(p);
+                    }
+                }
+
+                command = new PrepareHotspotPlatformCommand
+                {
+                    RequestId = requestId,
+                    PreferredSubnetPrefixes = prefixes,
+                    Port = port
                 };
                 return true;
             }
