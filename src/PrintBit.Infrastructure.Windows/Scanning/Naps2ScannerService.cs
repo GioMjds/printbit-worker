@@ -429,10 +429,16 @@ public sealed class Naps2ScannerService : IScannerService
             : "--bitdepth color ");
         sb.Append("--force --verbose ");
 
-        if (!string.IsNullOrWhiteSpace(paperSize))
+        var isFeeder = source.Equals("adf", StringComparison.OrdinalIgnoreCase)
+            || source.Equals("feeder", StringComparison.OrdinalIgnoreCase);
+        var pageSize = isFeeder ? paperSize?.Trim().ToLowerInvariant() switch
         {
-            sb.Append($"--pagesize {paperSize.ToLowerInvariant()} ");
-        }
+            "a4" => "a4",
+            "letter" => "letter",
+            "legal" => "legal",
+            _ => null
+        } : "216x297mm";
+        if (pageSize is not null) sb.Append($"--pagesize {pageSize} ");
 
         return sb.ToString().Trim();
     }
