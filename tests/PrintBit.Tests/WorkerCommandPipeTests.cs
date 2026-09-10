@@ -308,6 +308,57 @@ public class WorkerCommandPipeTests
         }
     }
 
+    [Fact]
+    public void CreatePipeSecurity_Windows_GrantsConfiguredClientSidReadWrite()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var clientSid = new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null);
+        var security = WorkerCommandPipeSecurity.CreatePipeSecurity(clientSid.Value);
+        var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+
+        var clientRules = rules
+            .OfType<PipeAccessRule>()
+            .Where(rule => Equals(rule.IdentityReference, clientSid))
+            .ToArray();
+
+        var clientRule = Assert.Single(clientRules);
+        Assert.Equal(AccessControlType.Allow, clientRule.AccessControlType);
+        Assert.Equal(PipeAccessRights.ReadWrite, clientRule.PipeAccessRights & PipeAccessRights.ReadWrite);
+        Assert.NotEqual(PipeAccessRights.FullControl, clientRule.PipeAccessRights & PipeAccessRights.FullControl);
+    }
+
+    [Theory]
+    [InlineData(WellKnownSidType.WorldSid)]
+    [InlineData(WellKnownSidType.AuthenticatedUserSid)]
+    public void CreatePipeSecurity_Windows_RejectsBroadConfiguredPrincipal(WellKnownSidType sidType)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var broadSid = new SecurityIdentifier(sidType, null);
+        Assert.Throws<ArgumentException>(
+            () => WorkerCommandPipeSecurity.CreatePipeSecurity(broadSid.Value));
+    }
+
+    [Fact]
+    public void CreatePipeSecurity_Windows_RejectsUnresolvableConfiguredAccount()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var missingAccount = $"PRINTBIT-MISSING\\{Guid.NewGuid():N}";
+        Assert.Throws<IdentityNotMappedException>(
+            () => WorkerCommandPipeSecurity.CreatePipeSecurity(missingAccount));
+    }
+
     #endregion
 
     #region 4. Dispatch Test: GetPrinterRecoveryStatus

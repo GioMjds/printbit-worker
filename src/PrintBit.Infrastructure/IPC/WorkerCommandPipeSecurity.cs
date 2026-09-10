@@ -14,30 +14,84 @@ public static class WorkerCommandPipeSecurity
     /// Excludes WorldSid (Everyone) and AuthenticatedUserSid.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public static PipeSecurity CreatePipeSecurity()
+    public static PipeSecurity CreatePipeSecurity(string? allowedClientIdentity = null)
     {
         var pipeSecurity = new PipeSecurity();
+        var grantedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         using var currentIdentity = WindowsIdentity.GetCurrent();
         if (currentIdentity.User != null)
         {
-            pipeSecurity.AddAccessRule(new PipeAccessRule(
+            AddAccessRuleIfMissing(
+                pipeSecurity,
+                grantedSids,
                 currentIdentity.User,
                 PipeAccessRights.FullControl,
-                AccessControlType.Allow));
+                AccessControlType.Allow);
         }
 
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
+        AddAccessRuleIfMissing(
+            pipeSecurity,
+            grantedSids,
             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
             PipeAccessRights.FullControl,
-            AccessControlType.Allow));
+            AccessControlType.Allow);
 
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
+        AddAccessRuleIfMissing(
+            pipeSecurity,
+            grantedSids,
             new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
             PipeAccessRights.ReadWrite,
-            AccessControlType.Allow));
+            AccessControlType.Allow);
+
+        if (!string.IsNullOrWhiteSpace(allowedClientIdentity))
+        {
+            var clientSid = ResolveIdentity(allowedClientIdentity.Trim());
+            if (clientSid.IsWellKnown(WellKnownSidType.WorldSid) ||
+                clientSid.IsWellKnown(WellKnownSidType.AuthenticatedUserSid))
+            {
+                throw new ArgumentException(
+                    "Worker command pipe client identity must not grant a broad Windows principal.",
+                    nameof(allowedClientIdentity));
+            }
+
+            AddAccessRuleIfMissing(
+                pipeSecurity,
+                grantedSids,
+                clientSid,
+                PipeAccessRights.ReadWrite,
+                AccessControlType.Allow);
+        }
 
         return pipeSecurity;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static SecurityIdentifier ResolveIdentity(string identity)
+    {
+        if (identity.StartsWith("S-", StringComparison.OrdinalIgnoreCase))
+        {
+            return new SecurityIdentifier(identity);
+        }
+
+        return (SecurityIdentifier)new NTAccount(identity)
+            .Translate(typeof(SecurityIdentifier));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AddAccessRuleIfMissing(
+        PipeSecurity pipeSecurity,
+        ISet<string> grantedSids,
+        SecurityIdentifier sid,
+        PipeAccessRights rights,
+        AccessControlType accessControlType)
+    {
+        if (!grantedSids.Add(sid.Value))
+        {
+            return;
+        }
+
+        pipeSecurity.AddAccessRule(new PipeAccessRule(sid, rights, accessControlType));
     }
 
     /// <summary>
@@ -48,11 +102,12 @@ public static class WorkerCommandPipeSecurity
         string pipeName,
         int maxNumberOfServerInstances = 1,
         PipeTransmissionMode transmissionMode = PipeTransmissionMode.Byte,
-        PipeOptions options = PipeOptions.Asynchronous)
+        PipeOptions options = PipeOptions.Asynchronous,
+        string? allowedClientIdentity = null)
     {
         if (OperatingSystem.IsWindows())
         {
-            var pipeSecurity = CreatePipeSecurity();
+            var pipeSecurity = CreatePipeSecurity(allowedClientIdentity);
             return NamedPipeServerStreamAcl.Create(
                 pipeName,
                 PipeDirection.InOut,

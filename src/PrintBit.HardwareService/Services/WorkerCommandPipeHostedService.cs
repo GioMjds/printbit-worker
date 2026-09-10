@@ -140,7 +140,8 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
             _settings.WorkerCommandPipeName,
             NamedPipeServerStream.MaxAllowedServerInstances,
             PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
+            PipeOptions.Asynchronous,
+            _settings.WorkerCommandAllowedClientIdentity);
     }
 
     private async Task HandleConnectedClientAsync(

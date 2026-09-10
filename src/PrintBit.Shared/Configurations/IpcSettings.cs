@@ -7,6 +7,7 @@ public class IpcSettings
     public string WorkerReturnPipeName { get; set; } = "printbit-worker-events";
     public string WorkerCommandPipeName { get; set; } = "printbit-worker-commands";
     public int WorkerCommandMaxConcurrency { get; set; } = 4;
+    public string? WorkerCommandAllowedClientIdentity { get; set; }
 
     // Time to wait for the Node.js listener when opening the named pipe.
     // 3 seconds is generous enough for cold start (Node.js booting alongside
