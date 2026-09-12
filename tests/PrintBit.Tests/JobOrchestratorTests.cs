@@ -12,7 +12,7 @@ namespace PrintBit.Tests;
 public class JobOrchestratorTests
 {
     [Fact]
-    public async Task ProcessJobAsync_ThreePagesTwoCopies_DispatchesOneNativeMultiCopyJob()
+    public async Task ProcessJobAsync_ThreePagesTwoCopies_DispatchesOriginalPdfPerCopy()
     {
         var tempPdf = CreatePdf(pageCount: 3);
         try
@@ -43,13 +43,22 @@ public class JobOrchestratorTests
                 {
                     dispatches.Add((filePath, copyNumber, pages.ToArray(), settings.Copies));
                     onProgress(1, pages.Count).GetAwaiter().GetResult();
-                    onProgress(5, pages.Count).GetAwaiter().GetResult();
+                    onProgress(3, pages.Count).GetAwaiter().GetResult();
                 })
-                .ReturnsAsync(new DocumentPrintResult
+                .ReturnsAsync((
+                    string _,
+                    string _,
+                    int _,
+                    IReadOnlyList<int> pages,
+                    PrintJobSettings _,
+                    Func<int, int, Task> _,
+                    Func<string, Task> _,
+                    Func<Task> _,
+                    CancellationToken _) => new DocumentPrintResult
                 {
                     State = PagePrintState.Completed,
-                    PagesPrinted = 6,
-                    TotalPages = 6,
+                    PagesPrinted = pages.Count,
+                    TotalPages = pages.Count,
                     PageCountConfidence = "confirmed"
                 });
 
@@ -77,22 +86,23 @@ public class JobOrchestratorTests
                     WorkerPrintEventType.PrintProgress,
                     WorkerPrintEventType.PrintProgress,
                     WorkerPrintEventType.PrintProgress,
+                    WorkerPrintEventType.PrintProgress,
                     WorkerPrintEventType.PrintSucceeded
                 ],
                 events.Select(evt => evt.Type));
             Assert.Equal(
-                [1, 5, 6],
+                [1, 3, 4, 6],
                 events
                     .Where(evt => evt.Type == WorkerPrintEventType.PrintProgress)
                     .Select(evt => evt.PagesPrinted));
             Assert.All(
                 events.Where(evt => evt.Type == WorkerPrintEventType.PrintProgress),
                 evt => Assert.Equal(6, evt.TotalPages));
-            var dispatch = Assert.Single(dispatches);
-            Assert.Equal(tempPdf, dispatch.FilePath);
-            Assert.Equal(1, dispatch.CopyNumber);
-            Assert.Equal([1, 2, 3], dispatch.Pages);
-            Assert.Equal(2, dispatch.Copies);
+            Assert.Equal(2, dispatches.Count);
+            Assert.All(dispatches, dispatch => Assert.Equal(tempPdf, dispatch.FilePath));
+            Assert.Equal([1, 2], dispatches.Select(dispatch => dispatch.CopyNumber));
+            Assert.All(dispatches, dispatch => Assert.Equal([1, 2, 3], dispatch.Pages));
+            Assert.All(dispatches, dispatch => Assert.Equal(1, dispatch.Copies));
 
             var terminal = Assert.Single(events, evt =>
                 evt.Type is WorkerPrintEventType.PrintSucceeded or WorkerPrintEventType.PrintFailed);
@@ -109,7 +119,7 @@ public class JobOrchestratorTests
     }
 
     [Fact]
-    public async Task ProcessJobAsync_MultiCopyJobPartiallyFails_EmitsFailedBestEffortResult()
+    public async Task ProcessJobAsync_SecondCopyPartiallyFails_EmitsFailedBestEffortResult()
     {
         var tempPdf = CreatePdf(pageCount: 3);
         try
@@ -126,15 +136,32 @@ public class JobOrchestratorTests
                     It.IsAny<Func<string, Task>>(),
                     It.IsAny<Func<Task>>(),
                     It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new DocumentPrintResult
-                {
-                    State = PagePrintState.Failed,
-                    FailureStage = PrintFailureStage.HardwareError,
-                    ErrorMessage = "Out of paper",
-                    PagesPrinted = 4,
-                    TotalPages = 6,
-                    PageCountConfidence = "best_effort"
-                });
+                .Returns((
+                    string _,
+                    string _,
+                    int copyNumber,
+                    IReadOnlyList<int> _,
+                    PrintJobSettings _,
+                    Func<int, int, Task> _,
+                    Func<string, Task> _,
+                    Func<Task> _,
+                    CancellationToken _) => Task.FromResult(copyNumber == 1
+                        ? new DocumentPrintResult
+                        {
+                            State = PagePrintState.Completed,
+                            PagesPrinted = 3,
+                            TotalPages = 3,
+                            PageCountConfidence = "confirmed"
+                        }
+                        : new DocumentPrintResult
+                        {
+                            State = PagePrintState.Failed,
+                            FailureStage = PrintFailureStage.HardwareError,
+                            ErrorMessage = "Out of paper",
+                            PagesPrinted = 1,
+                            TotalPages = 3,
+                            PageCountConfidence = "best_effort"
+                        }));
 
             var events = new List<WorkerPrintEvent>();
             var eventPipeMock = CreateEventPipe(events);

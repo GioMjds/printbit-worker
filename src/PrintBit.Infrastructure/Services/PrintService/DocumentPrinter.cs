@@ -134,9 +134,8 @@ public sealed class DocumentPrinter : IDocumentPrinter
             }
 
             _logger.LogInformation(
-                "SumatraPDF exited with code {exitCode} for {copyCount} native copies (dispatch {copyNumber})",
+                "SumatraPDF exited with code {exitCode} for copy {copyNumber}",
                 process.ExitCode,
-                Math.Max(1, settings.Copies),
                 copyNumber);
 
             if (process.ExitCode != 0)
@@ -231,6 +230,8 @@ public sealed class DocumentPrinter : IDocumentPrinter
     {
         var deadline = DateTime.UtcNow.Add(SpoolerProgressGracePeriod);
         var patienceDeadline = DateTime.UtcNow.AddMinutes(_settings.PauseTimeoutMinutes);
+        var activePrintDeadline = DateTime.UtcNow.AddSeconds(
+            Math.Max(_settings.PrintTimeoutSeconds, expectedPages * 90));
         var inPatienceMode = false;
         var observedActive = false;
         var maxPagesPrinted = 0;
@@ -259,6 +260,8 @@ public sealed class DocumentPrinter : IDocumentPrinter
                         deadline = RefreshVerificationDeadline(
                             deadline,
                             DateTime.UtcNow);
+                        activePrintDeadline = DateTime.UtcNow.AddSeconds(
+                            Math.Max(_settings.PrintTimeoutSeconds, (expectedPages - maxPagesPrinted + 1) * 90));
                         await onProgress(maxPagesPrinted, expectedPages);
                     }
 
@@ -294,6 +297,19 @@ public sealed class DocumentPrinter : IDocumentPrinter
                         deadline = RefreshVerificationDeadline(
                             deadline,
                             DateTime.UtcNow);
+                        activePrintDeadline = DateTime.UtcNow.AddSeconds(
+                            Math.Max(_settings.PrintTimeoutSeconds, expectedPages * 90));
+                    }
+                    else if (!isDeleting)
+                    {
+                        // Job is actively spooling or printing without error.
+                        // Refresh deadline so actively printing jobs don't time out prematurely.
+                        if (DateTime.UtcNow < activePrintDeadline)
+                        {
+                            deadline = RefreshVerificationDeadline(
+                                deadline,
+                                DateTime.UtcNow);
+                        }
                     }
                 }
                 else
@@ -384,6 +400,20 @@ public sealed class DocumentPrinter : IDocumentPrinter
                 maxPagesPrinted,
                 lastSpoolerJobId,
                 PrintFailureStage.Timeout);
+        }
+
+        if (observedActive && DateTime.UtcNow >= activePrintDeadline)
+        {
+            _healthMonitor.CancelMatchingJobs(
+                dispatchPrinterName,
+                documentName,
+                lastSpoolerJobId);
+            return Failed(
+                PrintFailureStage.Timeout,
+                "Print job exceeded active print timeout",
+                expectedPages,
+                maxPagesPrinted,
+                lastSpoolerJobId);
         }
 
         return Failed(

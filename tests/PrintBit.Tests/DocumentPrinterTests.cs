@@ -105,6 +105,51 @@ public class DocumentPrinterTests
     }
 
     [Fact]
+    public async Task PrintDocumentAsync_ActivePrintingWithoutError_ContinuesWaitingAndSucceedsWhenJobClears()
+    {
+        var dummyExe = GetDummyExecutablePath();
+        var tempPdf = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+        File.WriteAllText(tempPdf, "%PDF");
+
+        try
+        {
+            var healthMock = new Mock<IPrinterHealthMonitor>();
+            var pollCount = 0;
+            healthMock.Setup(h => h.QueryJobStatus(It.IsAny<string>(), It.IsAny<string>()))
+                .Returns(() => ++pollCount <= 3
+                    ? (true, 0x10u, "Printing", 1, 1, "123")
+                    : (false, 0u, string.Empty, 0, 0, null));
+
+            var errorCode = 0;
+            var errorMessage = string.Empty;
+            healthMock.Setup(h => h.HasFatalHardwareError(It.IsAny<string>(), out errorCode, out errorMessage))
+                .Returns(false);
+
+            var sut = CreateSut(dummyExe, healthMock.Object);
+
+            var result = await sut.PrintDocumentAsync(
+                tempPdf,
+                "TestPrinter",
+                1,
+                [1],
+                new PrintJobSettings(),
+                (_, _) => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                () => Task.CompletedTask,
+                CancellationToken.None);
+
+            Assert.Equal(PagePrintState.Completed, result.State);
+            Assert.Equal(1, result.PagesPrinted);
+            Assert.Equal(1, result.TotalPages);
+            Assert.Equal("confirmed", result.PageCountConfidence);
+        }
+        finally
+        {
+            File.Delete(tempPdf);
+        }
+    }
+
+    [Fact]
     public async Task PrintDocumentAsync_ClearedTruncatedJob_ReturnsIncompleteOutput()
     {
         var dummyExe = GetDummyExecutablePath();

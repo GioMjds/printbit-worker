@@ -60,7 +60,7 @@ public sealed class JobOrchestrator : IJobOrchestrator
             cancellationToken);
         var dispatchSettings = new PrintJobSettings
         {
-            Copies = Math.Max(1, request.Settings.Copies),
+            Copies = 1,
             Color = request.Settings.Color,
             Quality = request.Settings.Quality,
             Orientation = request.Settings.Orientation,
@@ -114,24 +114,33 @@ public sealed class JobOrchestrator : IJobOrchestrator
         var failureConfidence = PrintPageCountConfidence.Unknown;
         var lastEmittedProgress = 0;
 
-        cancellationToken.ThrowIfCancellationRequested();
-        var firstEntry = manifest[0];
-        if (!_healthMonitor.IsHealthy(request.PrinterName, out _, out _) &&
-            !await WaitForPreFlightHealthAsync(request, firstEntry, cancellationToken))
+        for (var copyNumber = 1; copyNumber <= totalCopies; copyNumber++)
         {
-            _healthMonitor.HasFatalHardwareError(request.PrinterName, out _, out var fatalDesc);
-            firstEntry.State = PagePrintState.Failed;
-            firstEntry.ErrorMessage = string.IsNullOrWhiteSpace(fatalDesc)
-                ? "Pause timeout exceeded during pre-flight health wait"
-                : $"Printer remained unhealthy during pre-flight health wait: {fatalDesc}";
-            CancelRemaining(manifest, firstEntry.SequenceIndex + 1);
-            failureStage = PrintFailureStage.HardwareError;
-            failureMessage = firstEntry.ErrorMessage;
-        }
-        else
-        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var copyEntries = manifest
+                .Where(entry => entry.CopyNumber == copyNumber)
+                .OrderBy(entry => entry.SequenceIndex)
+                .ToList();
+
+            if (!_healthMonitor.IsHealthy(request.PrinterName, out _, out _) &&
+                !await WaitForPreFlightHealthAsync(
+                    request,
+                    copyEntries[0],
+                    cancellationToken))
+            {
+                _healthMonitor.HasFatalHardwareError(request.PrinterName, out _, out var fatalDesc);
+                copyEntries[0].State = PagePrintState.Failed;
+                copyEntries[0].ErrorMessage = string.IsNullOrWhiteSpace(fatalDesc)
+                    ? "Pause timeout exceeded during pre-flight health wait"
+                    : $"Printer remained unhealthy during pre-flight health wait: {fatalDesc}";
+                CancelRemaining(manifest, copyEntries[0].SequenceIndex + 1);
+                failureStage = PrintFailureStage.HardwareError;
+                failureMessage = copyEntries[0].ErrorMessage;
+                break;
+            }
+
             var dispatchStartedAt = DateTime.UtcNow;
-            foreach (var entry in manifest)
+            foreach (var entry in copyEntries)
             {
                 entry.State = PagePrintState.Printing;
                 entry.StartedAt = dispatchStartedAt;
@@ -140,12 +149,12 @@ public sealed class JobOrchestrator : IJobOrchestrator
             var result = await _documentPrinter.PrintDocumentAsync(
                 prepared.FilePath,
                 request.PrinterName,
-                1,
+                copyNumber,
                 pagesToPrint,
                 dispatchSettings,
                 async (printed, _) =>
                 {
-                    var cumulativePagesPrinted = Math.Clamp(printed, 0, manifest.Count);
+                    var cumulativePagesPrinted = (copyNumber - 1) * pagesToPrint.Count + Math.Clamp(printed, 0, pagesToPrint.Count);
                     MarkProgress(manifest, cumulativePagesPrinted);
                     if (cumulativePagesPrinted <= lastEmittedProgress)
                     {
@@ -165,9 +174,9 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 },
                 error =>
                 {
-                    var activeEntry = GetActiveEntry(manifest);
+                    var activeEntry = GetActiveEntry(copyEntries);
                     _logger.LogWarning(
-                        "Multi-copy job paused at copy {copyNumber}, page {pageNumber}: {error}",
+                        "Whole-document copy {copyNumber} paused at page {pageNumber}: {error}",
                         activeEntry.CopyNumber,
                         activeEntry.PageNumber,
                         error);
@@ -175,9 +184,9 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 },
                 () =>
                 {
-                    var activeEntry = GetActiveEntry(manifest);
+                    var activeEntry = GetActiveEntry(copyEntries);
                     _logger.LogInformation(
-                        "Multi-copy job resumed at copy {copyNumber}, page {pageNumber}",
+                        "Whole-document copy {copyNumber} resumed at page {pageNumber}",
                         activeEntry.CopyNumber,
                         activeEntry.PageNumber);
                     return Task.CompletedTask;
@@ -185,43 +194,48 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 cancellationToken);
 
             spoolerJobId = result.SpoolerJobId ?? spoolerJobId;
-            MarkProgress(manifest, result.PagesPrinted);
+            var cumulativePrinted = (copyNumber - 1) * pagesToPrint.Count + result.PagesPrinted;
+            MarkProgress(manifest, cumulativePrinted);
 
             if (result.State == PagePrintState.Completed)
             {
-                MarkProgress(manifest, manifest.Count);
-                if (lastEmittedProgress < manifest.Count)
+                var copyCompletedTotal = copyNumber * pagesToPrint.Count;
+                MarkProgress(manifest, copyCompletedTotal);
+                if (lastEmittedProgress < copyCompletedTotal)
                 {
-                    lastEmittedProgress = manifest.Count;
+                    lastEmittedProgress = copyCompletedTotal;
                     await SendProgressEventAsync(
                         transactionId,
                         spoolerCorrelationKey,
                         request.PrinterName,
                         fileName,
-                        manifest.Count,
+                        copyCompletedTotal,
                         manifest.Count,
                         totalCopies,
                         cancellationToken);
                 }
+                continue;
             }
-            else
-            {
-                var failedEntry = manifest.FirstOrDefault(
-                    entry => entry.State != PagePrintState.Completed);
-                if (failedEntry is not null)
-                {
-                    failedEntry.State = PagePrintState.Failed;
-                    failedEntry.ErrorMessage = result.ErrorMessage;
-                    failedEntry.CompletedAt = DateTime.UtcNow;
-                    CancelRemaining(manifest, failedEntry.SequenceIndex + 1);
-                }
 
-                failureStage = result.FailureStage == PrintFailureStage.None
-                    ? PrintFailureStage.SpoolerVerification
-                    : result.FailureStage;
-                failureMessage = result.ErrorMessage ?? "Multi-copy print failed";
-                failureConfidence = result.PageCountConfidence;
+            var copyPagesPrinted = (copyNumber - 1) * pagesToPrint.Count + Math.Clamp(result.PagesPrinted, 0, pagesToPrint.Count);
+            MarkProgress(manifest, copyPagesPrinted);
+
+            var failedEntry = copyEntries.FirstOrDefault(
+                entry => entry.State != PagePrintState.Completed);
+            if (failedEntry is not null)
+            {
+                failedEntry.State = PagePrintState.Failed;
+                failedEntry.ErrorMessage = result.ErrorMessage;
+                failedEntry.CompletedAt = DateTime.UtcNow;
+                CancelRemaining(manifest, failedEntry.SequenceIndex + 1);
             }
+
+            failureStage = result.FailureStage == PrintFailureStage.None
+                ? PrintFailureStage.SpoolerVerification
+                : result.FailureStage;
+            failureMessage = result.ErrorMessage ?? "Whole-document print failed";
+            failureConfidence = result.PageCountConfidence;
+            break;
         }
 
         var completedAt = DateTime.UtcNow;
@@ -257,12 +271,12 @@ public sealed class JobOrchestrator : IJobOrchestrator
             CompletedCount = completedCount,
             CancelledCount = cancelledCount,
             FailedCount = failedCount,
-            Pages = manifest.Select(entry => new WorkerPrintPageResult
+            Pages = [.. manifest.Select(entry => new WorkerPrintPageResult
             {
                 Page = entry.PageNumber,
                 Copy = entry.CopyNumber,
                 State = entry.State.ToString().ToLowerInvariant()
-            }).ToList(),
+            })],
             StartedAt = startedAt,
             CompletedAt = completedAt,
             FailureStage = fullyCompleted ? null : failureStage.ToString(),
