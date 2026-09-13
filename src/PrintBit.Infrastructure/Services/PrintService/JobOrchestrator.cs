@@ -66,6 +66,9 @@ public sealed class JobOrchestrator : IJobOrchestrator
             Orientation = request.Settings.Orientation,
             RotationDeg = 0,
             PaperSize = request.Settings.PaperSize,
+            // Preparation already applies the customer's Fit/Actual layout.
+            // Keep the target-sized PDF at 1:1 to avoid a second shrink.
+            Scaling = "actual",
             PageRange = null,
             Duplex = false
         };

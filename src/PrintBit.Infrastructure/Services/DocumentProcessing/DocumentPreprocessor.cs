@@ -7,8 +7,6 @@ namespace PrintBit.Infrastructure.Services.DocumentProcessing;
 
 public sealed class DocumentPreprocessor : IDocumentPreprocessor
 {
-    private const double SafeMarginPoints = 14.4;
-
     public Task<PreparedDocument> PrepareAsync(
         string sourcePath,
         PrintJobSettings settings,
@@ -56,10 +54,24 @@ public sealed class DocumentPreprocessor : IDocumentPreprocessor
             var page = output.AddPage();
             SetPaperGeometry(page, settings.PaperSize, settings.Orientation);
 
-            var pageNativeRotation = form.Page?.Rotate ?? 0;
+            var sourcePage = form.Page ?? throw new InvalidDataException("PDF page is missing");
+            var originalMediaBox = sourcePage.MediaBox;
+            var pageNativeRotation = sourcePage.Rotate;
             var totalRotation = NormalizeRotation(pageNativeRotation + settings.RotationDeg);
-
-            RenderFormToPage(XGraphics.FromPdfPage(page), form, page, totalRotation);
+            try
+            {
+                // PDFsharp imports /Rotate and uses MediaBox as the form's clipping
+                // box. Normalize both so the visible page matches PDF.js and rotation
+                // is applied exactly once by our outer layout transform.
+                sourcePage.Rotate = 0;
+                sourcePage.MediaBox = VisibleBox(originalMediaBox, sourcePage.CropBox);
+                RenderFormToPage(XGraphics.FromPdfPage(page), form, page, totalRotation, settings);
+            }
+            finally
+            {
+                sourcePage.MediaBox = originalMediaBox;
+                sourcePage.Rotate = pageNativeRotation;
+            }
         }
 
         if (settings.Duplex && output.PageCount % 2 == 1)
@@ -73,40 +85,35 @@ public sealed class DocumentPreprocessor : IDocumentPreprocessor
         return outputPageCount;
     }
 
-    private static void RenderFormToPage(XGraphics graphics, XPdfForm form, PdfPage page, int rotation)
+    private static void RenderFormToPage(XGraphics graphics, XPdfForm form, PdfPage page, int rotation, PrintJobSettings settings)
     {
         using (graphics)
         {
             var rawW = form.PointWidth;
             var rawH = form.PointHeight;
 
-            var is90or270 = rotation is 90 or 270;
-            var contentW = is90or270 ? rawH : rawW;
-            var contentH = is90or270 ? rawW : rawH;
-
-            var availW = Math.Max(1.0, page.Width.Point - (2 * SafeMarginPoints));
-            var availH = Math.Max(1.0, page.Height.Point - (2 * SafeMarginPoints));
-
-            var scale = Math.Min(availW / contentW, availH / contentH);
-
-            var destW = rawW * scale;
-            var destH = rawH * scale;
+            var scale = PrintLayout.Calculate(rawW, rawH, settings, rotation).Scale;
 
             var cx = page.Width.Point / 2;
             var cy = page.Height.Point / 2;
-
-            if (rotation != 0)
-            {
-                graphics.RotateAtTransform(rotation, new XPoint(cx, cy));
-            }
-
-            graphics.DrawImage(
-                form,
-                cx - (destW / 2),
-                cy - (destH / 2),
-                destW,
-                destH);
+            graphics.TranslateTransform(cx, cy);
+            graphics.RotateTransform(rotation);
+            // Scale the coordinate system, not DrawImage dimensions: PDFsharp's
+            // imported MediaBox origin offsets must scale with the content too.
+            graphics.ScaleTransform(scale);
+            graphics.DrawImage(form, -rawW / 2, -rawH / 2, rawW, rawH);
         }
+    }
+
+    private static PdfRectangle VisibleBox(PdfRectangle media, PdfRectangle crop)
+    {
+        var left = Math.Max(media.X1, crop.X1);
+        var bottom = Math.Max(media.Y1, crop.Y1);
+        var right = Math.Min(media.X2, crop.X2);
+        var top = Math.Min(media.Y2, crop.Y2);
+        return right > left && top > bottom
+            ? new PdfRectangle(new XPoint(left, bottom), new XPoint(right, top))
+            : media;
     }
 
     private static int PrepareImage(
@@ -129,27 +136,21 @@ public sealed class DocumentPreprocessor : IDocumentPreprocessor
         SetPaperGeometry(page, settings.PaperSize, settings.Orientation);
 
         var rotation = NormalizeRotation(settings.RotationDeg);
-        RenderImageToPage(XGraphics.FromPdfPage(page), image, page, rotation);
+        RenderImageToPage(XGraphics.FromPdfPage(page), image, page, rotation, settings);
 
         output.Save(outputPath);
         return 1;
     }
 
-    private static void RenderImageToPage(XGraphics graphics, XImage image, PdfPage page, int rotation)
+    private static void RenderImageToPage(XGraphics graphics, XImage image, PdfPage page, int rotation, PrintJobSettings settings)
     {
         using (graphics)
         {
-            var rawW = (double)image.PixelWidth;
-            var rawH = (double)image.PixelHeight;
-
-            var is90or270 = rotation is 90 or 270;
-            var contentW = is90or270 ? rawH : rawW;
-            var contentH = is90or270 ? rawW : rawH;
-
-            var availW = Math.Max(1.0, page.Width.Point - (2 * SafeMarginPoints));
-            var availH = Math.Max(1.0, page.Height.Point - (2 * SafeMarginPoints));
-
-            var scale = Math.Min(availW / contentW, availH / contentH);
+            // Browser image previews use pixel geometry. Separate X/Y DPI tags
+            // must not distort that aspect ratio. Internal actual uses 1 px = 1 pt.
+            var rawW = image.PixelWidth;
+            var rawH = image.PixelHeight;
+            var scale = PrintLayout.Calculate(rawW, rawH, settings, rotation).Scale;
 
             var destW = rawW * scale;
             var destH = rawH * scale;
@@ -173,16 +174,7 @@ public sealed class DocumentPreprocessor : IDocumentPreprocessor
 
     private static void SetPaperGeometry(PdfPage page, string? paperSize, string? orientation)
     {
-        var (width, height) = paperSize?.ToUpperInvariant() switch
-        {
-            "LETTER" => (612d, 792d),
-            "LEGAL" => (612d, 1008d),
-            _ => (595.28d, 841.89d)
-        };
-        if (string.Equals(orientation, "landscape", StringComparison.OrdinalIgnoreCase))
-        {
-            (width, height) = (height, width);
-        }
+        var (width, height) = PrintLayout.PaperGeometry(paperSize, orientation);
         page.Width = XUnit.FromPoint(width);
         page.Height = XUnit.FromPoint(height);
     }

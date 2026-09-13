@@ -187,7 +187,8 @@ public sealed class DocumentPrinter : IDocumentPrinter
             printSettings.Add("portrait");
         }
 
-        printSettings.Add("fit");
+        printSettings.Add(string.Equals(settings.Scaling, "actual", StringComparison.OrdinalIgnoreCase)
+            ? "noscale" : "fit");
         printSettings.Add("ignore-pdf-print-settings");
         printSettings.Add("collate");
 

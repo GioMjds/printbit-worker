@@ -112,7 +112,7 @@ Defined in `Esp32Command`:
 `JobOrchestrator` submits the prepared PDF sequentially copy-by-copy (`copies = 1` per dispatch):
 
 ```
-SumatraPDF.exe -print-to "<printerName>" -print-settings "1x,<color|monochrome>,<pages>,paper=<size>,fit,ignore-pdf-print-settings,collate" -silent "<filePath>"
+SumatraPDF.exe -print-to "<printerName>" -print-settings "1x,<color|monochrome>,<pages>,paper=<size>,<portrait|landscape>,noscale,ignore-pdf-print-settings,collate" -silent "<filePath>"
 ```
 
 Critical constraints:
@@ -120,7 +120,8 @@ Critical constraints:
 - The physical printer identity comes from `HardwareSettings.PrinterName`; it is used for health monitoring and must exactly match Windows registration.
 - The dispatch queue comes from `HardwareSettings.PrinterProfiles`: quality and orientation select `Standard`, `StandardLandscape`, `High`, or `HighLandscape`; Standard portrait falls back to `PrinterName`.
 - Requested copies are dispatched sequentially copy-by-copy; the prepared PDF is reused across copies without redundant re-preprocessing. This provides granular per-copy progress, preflight health checks before each copy, and deterministic refund accounting on partial failures.
-- Page ranges, color, explicit content rotation, paper size, fitting, and collation are passed through Sumatra's `-print-settings` argument. Paper orientation comes from the selected queue's Epson defaults, with Sumatra auto-rotation enabled to fit PDF content to that paper.
+- Page selection and rotation are baked into the prepared PDF. `PrintJobSettings.Scaling` defaults to `fit`; `PrintLayout` fits once inside a 14.4 pt application inset on the selected A4/Letter/Legal target. Prepared dispatch uses `actual` (`noscale` in Sumatra) to avoid a second shrink. Direct unprepared dispatch still defaults to `fit`.
+- Color, target paper, orientation, collation and `ignore-pdf-print-settings` are explicit Sumatra arguments. Paper orientation and quality also depend on the selected logical queue's Epson defaults. Driver Reduce/Enlarge must stay off; the application inset is not measured printer-margin data.
 - Print jobs are serialized via `SemaphoreSlim(1, 1)` inside `DocumentPrinter`.
 - Before dispatch, `JobOrchestrator` waits up to `PauseTimeoutMinutes` for `PrinterHealthMonitor.IsHealthy` to return true.
 - Print quality is supplied by fixed Windows logical queues whose system-wide Epson Printing Defaults are preconfigured as Standard or High. `DocumentPrinter` does not mutate global `DEVMODE` settings per job.
@@ -313,7 +314,8 @@ Dependency direction:
 | `WorkerCommandParser` | Infrastructure.IPC | Strict command deserializer with byte-limit protection, enum validation, and `RequestId` preservation |
 | `JobOrchestrator` | Infrastructure | Preprocesses source geometry, coordinates exclusive execution with recovery via `IPrinterOperationCoordinator`, dispatches print jobs sequentially copy-by-copy, maps progress to page/copy results, and emits lifecycle events |
 | `DocumentPreprocessor` | Infrastructure | Selects pages, normalizes PDF orientation and rotation, pads odd duplex jobs, rasterizes supported images, and cleans temporary prepared PDFs before printer dispatch |
-| `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation, rotation, paper size) |
+| `PrintJobSettings` | Infrastructure | Print job configuration model (copies, color, quality (`"standard"` / `"high"`), page range, orientation, rotation, paper size, scaling (`"fit"` default / `"actual"`)) |
+| `PrintLayout` | Infrastructure | Shared-contract target geometry and aspect-preserving Fit inset; mirrored by Node `src/shared/print-configuration.ts` |
 
 Legacy ESP32/orchestrator classes were removed when the runtime committed to
 printer-only mode. The DI container hosts background services (`PrintQueueWatcher`,
@@ -567,7 +569,9 @@ ESP32/coin/hopper constraints below are legacy context and not used in the curre
 - Standard/High and portrait/landscape combinations use four logical queues for the same physical printer. Quality and paper orientation come from each queue's saved system-wide Epson Printing Defaults, not Sumatra content-orientation options or a generic DPI/`DEVMODE` mapping.
 - Spooler tracking and cancellation use the selected logical queue; physical health checks continue to use `HardwareSettings.PrinterName`.
 - The prepared PDF is submitted sequentially copy-by-copy with `copies = 1` per dispatch, ensuring accurate copy-level progress and refund accounting.
-- `JobOrchestrator` preprocesses queued sources before dispatch. Page selection, explicit rotation, orientation geometry, image rasterization, and duplex padding are baked into a temporary PDF; color and printer-profile selection remain driver settings.
+- `JobOrchestrator` preprocesses queued sources before dispatch. Page selection, native plus explicit rotation, target geometry, Fit/Actual scaling, image rasterization, and duplex padding are baked into a temporary PDF; color and printer-profile selection remain driver settings. Prepared dispatch uses `noscale` and suppresses embedded PDF print preferences.
+- PDF preparation uses the visible CropBox/MediaBox intersection, preserving its origin and applying native rotation once. Image Fit preserves pixel aspect ratio regardless of unequal X/Y DPI tags. Internal image Actual uses one pixel per PDF point, not metadata physical size.
+- A4 (595.28 x 841.89 pt), Letter (612 x 792 pt) and Legal (612 x 1008 pt) remain distinct physical targets. Staff must load matching stock. The 14.4 pt safety inset and all four profile defaults require physical Epson acceptance testing.
 - Print execution is single-job serialized (`SemaphoreSlim(1, 1)` in `DocumentPrinter`).
 - Success requires both process success and spooler lifecycle verification.
 - Spooler verification checks `Win32_PrintJob.StatusMask` for error, offline, paper-out, blocked-queue, and user-intervention flags and checks `PrinterHealthMonitor` for fatal hardware errors. Hardware errors return `PrintFailureStage.HardwareError` without triggering spooler recovery. An actively printing spooler job without errors extends the verification deadline up to the document's active print deadline, ensuring slow or multi-page output does not trigger false timeouts due to WMI `PagesPrinted` update lag.

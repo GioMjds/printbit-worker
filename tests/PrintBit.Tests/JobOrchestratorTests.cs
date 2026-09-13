@@ -41,6 +41,9 @@ public class JobOrchestratorTests
                     Func<Task> _,
                     CancellationToken _) =>
                 {
+                    using var process = DocumentPrinter.BuildPrintProcess(
+                        "SumatraPDF.exe", filePath, "TestPrinter", pages, settings);
+                    Assert.Contains("noscale", process.StartInfo.ArgumentList[3].Split(','));
                     dispatches.Add((filePath, copyNumber, pages.ToArray(), settings.Copies));
                     onProgress(1, pages.Count).GetAwaiter().GetResult();
                     onProgress(3, pages.Count).GetAwaiter().GetResult();

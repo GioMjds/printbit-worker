@@ -10,6 +10,18 @@ namespace PrintBit.Tests;
 public class DocumentPrinterTests
 {
     [Fact]
+    public void BuildPrintProcess_ExplicitActualSizeDoesNotFitAgain()
+    {
+        var settings = System.Text.Json.JsonSerializer.Deserialize<PrintJobSettings>(
+            "{\"scaling\":\"actual\",\"paperSize\":\"Letter\"}",
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+        using var process = DocumentPrinter.BuildPrintProcess(
+            "SumatraPDF.exe", "prepared.pdf", "TestPrinter", [1], settings);
+        Assert.Contains("noscale", process.StartInfo.ArgumentList[3].Split(','));
+        Assert.DoesNotContain("fit", process.StartInfo.ArgumentList[3].Split(','));
+    }
+
+    [Fact]
     public void SpoolerPolling_IsFrequentEnoughForResponsiveProgress()
     {
         Assert.True(DocumentPrinter.SpoolerPollInterval <= TimeSpan.FromMilliseconds(500));

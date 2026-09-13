@@ -67,13 +67,14 @@ public class PrintQueueWatcher : BackgroundService
                         var printSettings = JsonSerializer.Deserialize<PrintJobSettings>(jsonContent, JsonOptions) ?? new PrintJobSettings();
 
                         _logger.LogInformation(
-                            "Detected print job: {pdfFile} | Copies={copies}, Color={color}, Orientation={orientation}, Quality={quality}, PaperSize={paperSize}, PageRange={pageRange}, RotationDeg={rotationDeg}",
+                            "Detected print job: {pdfFile} | Copies={copies}, Color={color}, Orientation={orientation}, Quality={quality}, PaperSize={paperSize}, Scaling={scaling}, PageRange={pageRange}, RotationDeg={rotationDeg}",
                             pdfFile,
                             printSettings.Copies,
                             printSettings.Color,
                             printSettings.Orientation,
                             printSettings.Quality,
                             printSettings.PaperSize,
+                            printSettings.Scaling,
                             printSettings.PageRange,
                             printSettings.RotationDeg);
 
