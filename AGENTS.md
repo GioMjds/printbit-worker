@@ -402,7 +402,7 @@ Bound from `appsettings.json` via `IOptions<HardwareSettings>`:
     "SumatraPath": "C:\\Users\\printbit\\bin\\SumatraPDF.exe",
     "QpdfPath": "C:\\Program Files\\qpdf 12.3.2\\bin\\qpdf.exe",
     "PauseTimeoutMinutes": 15,
-    "PostClearGuardDelaySeconds": 12
+    "PostClearGuardDelaySeconds": 3
   },
   "IpcSettings": {
     "PipeName": "printbit-node-errors",

@@ -68,7 +68,7 @@ public class WorkerPrintEventTests
         Assert.Equal(@"C:\Users\printbit\bin\SumatraPDF.exe", settings.SumatraPath);
         Assert.Equal(@"C:\Users\printbit\bin\qpdf.exe", settings.QpdfPath);
         Assert.Equal(15, settings.PauseTimeoutMinutes);
-        Assert.Equal(12, settings.PostClearGuardDelaySeconds);
+        Assert.Equal(3, settings.PostClearGuardDelaySeconds);
         Assert.Null(typeof(HardwareSettings).GetProperty("PdfSplitTimeoutSeconds"));
     }
 

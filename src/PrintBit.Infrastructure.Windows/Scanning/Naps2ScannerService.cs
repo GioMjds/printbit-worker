@@ -32,8 +32,17 @@ public sealed class Naps2ScannerService : IScannerService
         };
     }
 
+    private static readonly TimeSpan StatusCacheDuration = TimeSpan.FromSeconds(60);
+
     public async Task<ScannerRuntimeStatus> GetStatusAsync(CancellationToken cancellationToken = default)
     {
+        if (_lastKnownStatus.Connected &&
+            !string.IsNullOrWhiteSpace(_lastKnownStatus.DeviceName) &&
+            DateTime.UtcNow - _lastKnownStatus.LastCheckedAt < StatusCacheDuration)
+        {
+            return _lastKnownStatus;
+        }
+
         if (File.Exists(_settings.Naps2Path))
         {
             var caps = await ProbeCapabilitiesAsync(cancellationToken);
@@ -122,8 +131,11 @@ public sealed class Naps2ScannerService : IScannerService
 
     public async Task<ScanResult> ExecuteScanAsync(ScanRequest request, CancellationToken cancellationToken = default)
     {
-        // Probe or fallback
-        var status = await GetStatusAsync(cancellationToken);
+        // Reuse known connected status if fresh to avoid 4-5s NAPS2 --listdevices probing overhead
+        var status = (_lastKnownStatus.Connected && !string.IsNullOrWhiteSpace(_lastKnownStatus.DeviceName))
+            ? _lastKnownStatus
+            : await GetStatusAsync(cancellationToken);
+
         if (status.UsingStub || !File.Exists(_settings.Naps2Path) || !status.Connected)
         {
             if (_settings.EnableStubFallback)
@@ -431,7 +443,8 @@ public sealed class Naps2ScannerService : IScannerService
 
         var isFeeder = source.Equals("adf", StringComparison.OrdinalIgnoreCase)
             || source.Equals("feeder", StringComparison.OrdinalIgnoreCase);
-        var pageSize = isFeeder ? paperSize?.Trim().ToLowerInvariant() switch
+        var normPaper = paperSize?.Trim().ToLowerInvariant();
+        var pageSize = isFeeder ? normPaper switch
         {
             "a4" => "a4",
             "letter" => "letter",
@@ -439,7 +452,12 @@ public sealed class Naps2ScannerService : IScannerService
             // context maps to US Legal (8.5×14 in), not the Philippine 13-inch size.
             "legal" or "folio" => "216x330mm",
             _ => null
-        } : "216x297mm";
+        } : normPaper switch
+        {
+            "letter" => "216x279mm",
+            "legal" or "folio" => "216x330mm",
+            _ => "216x297mm"
+        };
         if (pageSize is not null) sb.Append($"--pagesize {pageSize} ");
 
         return sb.ToString().Trim();
