@@ -100,6 +100,175 @@ public class PrinterRecoveryService : IPrinterRecoveryService
     public Task<PrinterRecoveryResult> AttemptRepairAsync(SupervisorDecision decision, CancellationToken cancellationToken) =>
         AttemptRepairCoreAsync(decision, cancellationToken);
 
+    public async Task<PrinterRecoveryResult> RestartSpoolerAsync(string? targetPrinterName, CancellationToken cancellationToken)
+    {
+        var startedAt = DateTime.UtcNow;
+
+        if (!_coordinator.TryAcquireRecovery(out var lease) || lease == null)
+        {
+            _logger?.LogWarning("RestartSpoolerAsync rejected: operation lease could not be acquired (worker busy).");
+            return new PrinterRecoveryResult
+            {
+                RequestId = string.Empty,
+                Type = PrinterRecoveryCommandType.RestartPrintSpooler,
+                Outcome = PrinterRecoveryOutcome.WorkerBusy,
+                Action = null,
+                SpoolerState = null,
+                PrinterState = null,
+                IssueKind = null,
+                Message = "Printer spooler restart is unavailable while an operation is active.",
+                StartedAt = startedAt,
+                CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        using (lease)
+        {
+            var printerName = !string.IsNullOrWhiteSpace(targetPrinterName)
+                ? targetPrinterName
+                : ResolvePrinterName();
+
+            var diagnostic = _healthMonitor.GetDiagnostic(printerName);
+
+            // Check for physical fault before attempting restart — cannot fix via spooler
+            if (diagnostic.IssueKind == PrinterHealthIssueKind.PhysicalFault)
+            {
+                var physicalMsg = !string.IsNullOrWhiteSpace(diagnostic.WinSpoolDescription)
+                    ? diagnostic.WinSpoolDescription
+                    : (!string.IsNullOrWhiteSpace(diagnostic.WmiDescription)
+                        ? diagnostic.WmiDescription
+                        : "Physical printer fault detected. Manual intervention required.");
+
+                _logger?.LogWarning(
+                    "RestartSpoolerAsync: Printer '{PrinterName}' has physical fault ({Message}). Spooler restart cannot fix a physical fault.",
+                    printerName,
+                    physicalMsg);
+
+                return new PrinterRecoveryResult
+                {
+                    RequestId = string.Empty,
+                    Type = PrinterRecoveryCommandType.RestartPrintSpooler,
+                    Outcome = PrinterRecoveryOutcome.ManualInterventionRequired,
+                    Action = null,
+                    SpoolerState = null,
+                    PrinterState = diagnostic.PrinterState.ToString(),
+                    IssueKind = diagnostic.IssueKind.ToString(),
+                    Message = physicalMsg,
+                    StartedAt = startedAt,
+                    CompletedAt = DateTime.UtcNow
+                };
+            }
+
+            _logger?.LogInformation(
+                "RestartSpoolerAsync: Restarting Print Spooler for printer '{PrinterName}' (admin-requested).",
+                printerName);
+
+            var restartResult = await _spoolerController.RestartAsync(cancellationToken);
+            if (!restartResult.Success)
+            {
+                var errorMsg = $"Print Spooler restart failed: {restartResult.Error}";
+                _logger?.LogError("RestartSpoolerAsync: {Message}", errorMsg);
+
+                return new PrinterRecoveryResult
+                {
+                    RequestId = string.Empty,
+                    Type = PrinterRecoveryCommandType.RestartPrintSpooler,
+                    Outcome = PrinterRecoveryOutcome.RestartFailed,
+                    Action = RestartSpoolerAction,
+                    SpoolerState = MapSpoolerState(restartResult),
+                    PrinterState = diagnostic.PrinterState.ToString(),
+                    IssueKind = diagnostic.IssueKind.ToString(),
+                    Message = errorMsg,
+                    StartedAt = startedAt,
+                    CompletedAt = DateTime.UtcNow
+                };
+            }
+
+            // Poll health monitor until healthy or timeout
+            var recheckTimeoutSeconds = Math.Max(0, _recoverySettings.HealthRecheckTimeoutSeconds);
+            var intervalSeconds = Math.Max(0, _recoverySettings.HealthRecheckIntervalSeconds);
+            var deadline = DateTime.UtcNow.AddSeconds(recheckTimeoutSeconds);
+
+            var latestDiagnostic = _healthMonitor.GetDiagnostic(printerName);
+
+            while (!latestDiagnostic.IsHealthy && DateTime.UtcNow < deadline)
+            {
+                var delayMs = (int)(intervalSeconds * 1000);
+                if (delayMs > 0)
+                {
+                    await Task.Delay(delayMs, cancellationToken);
+                }
+
+                latestDiagnostic = _healthMonitor.GetDiagnostic(printerName);
+
+                if (delayMs == 0)
+                {
+                    break;
+                }
+            }
+
+            if (latestDiagnostic.IsHealthy)
+            {
+                _logger?.LogInformation(
+                    "RestartSpoolerAsync: Printer '{PrinterName}' is healthy after spooler restart.",
+                    printerName);
+
+                return new PrinterRecoveryResult
+                {
+                    RequestId = string.Empty,
+                    Type = PrinterRecoveryCommandType.RestartPrintSpooler,
+                    Outcome = PrinterRecoveryOutcome.Recovered,
+                    Action = RestartSpoolerAction,
+                    SpoolerState = MapSpoolerState(restartResult),
+                    PrinterState = latestDiagnostic.PrinterState.ToString(),
+                    IssueKind = latestDiagnostic.IssueKind.ToString(),
+                    Message = "Print Spooler restarted successfully and printer health confirmed.",
+                    StartedAt = startedAt,
+                    CompletedAt = DateTime.UtcNow
+                };
+            }
+            else if (latestDiagnostic.IssueKind == PrinterHealthIssueKind.PhysicalFault)
+            {
+                var physicalMsg = $"Print Spooler restarted, but physical printer fault detected ({latestDiagnostic.PrinterState}, {latestDiagnostic.IssueKind}). Manual intervention required.";
+                _logger?.LogWarning("RestartSpoolerAsync: {Message}", physicalMsg);
+
+                return new PrinterRecoveryResult
+                {
+                    RequestId = string.Empty,
+                    Type = PrinterRecoveryCommandType.RestartPrintSpooler,
+                    Outcome = PrinterRecoveryOutcome.ManualInterventionRequired,
+                    Action = null,
+                    SpoolerState = MapSpoolerState(restartResult),
+                    PrinterState = latestDiagnostic.PrinterState.ToString(),
+                    IssueKind = latestDiagnostic.IssueKind.ToString(),
+                    Message = physicalMsg,
+                    StartedAt = startedAt,
+                    CompletedAt = DateTime.UtcNow
+                };
+            }
+            else
+            {
+                var failureMsg = $"Print Spooler restarted, but printer remained unhealthy ({latestDiagnostic.PrinterState}, {latestDiagnostic.IssueKind}) after recheck deadline.";
+                _logger?.LogWarning("RestartSpoolerAsync: {Message}", failureMsg);
+
+                return new PrinterRecoveryResult
+                {
+                    RequestId = string.Empty,
+                    Type = PrinterRecoveryCommandType.RestartPrintSpooler,
+                    Outcome = PrinterRecoveryOutcome.RestartFailed,
+                    Action = RestartSpoolerAction,
+                    SpoolerState = MapSpoolerState(restartResult),
+                    PrinterState = latestDiagnostic.PrinterState.ToString(),
+                    IssueKind = latestDiagnostic.IssueKind.ToString(),
+                    Message = failureMsg,
+                    StartedAt = startedAt,
+                    CompletedAt = DateTime.UtcNow
+                };
+            }
+        }
+    }
+
+
     private async Task<PrinterRecoveryResult> AttemptRepairCoreAsync(SupervisorDecision? decision, CancellationToken cancellationToken)
     {
         var startedAt = DateTime.UtcNow;

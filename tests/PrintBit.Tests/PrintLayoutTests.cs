@@ -24,4 +24,15 @@ public class PrintLayoutTests
         { PaperSize = "Letter", Scaling = "actual" }, 0);
         Assert.Equal(1, layout.Scale);
     }
+
+    [Theory]
+    [InlineData("portrait", 612, 936)]
+    [InlineData("landscape", 936, 612)]
+    public void PaperGeometry_LegalIs8Point5By13Inches(string orientation, double expectedWidth, double expectedHeight)
+    {
+        var (width, height) = PrintLayout.PaperGeometry("Legal", orientation);
+        Assert.Equal(expectedWidth, width);
+        Assert.Equal(expectedHeight, height);
+    }
 }
+

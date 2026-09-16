@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -435,7 +435,9 @@ public sealed class Naps2ScannerService : IScannerService
         {
             "a4" => "a4",
             "letter" => "letter",
-            "legal" => "legal",
+            // Use explicit dimensions for Long Bond (8.5×13 in) — "legal" in NAPS2/scanner
+            // context maps to US Legal (8.5×14 in), not the Philippine 13-inch size.
+            "legal" or "folio" => "216x330mm",
             _ => null
         } : "216x297mm";
         if (pageSize is not null) sb.Append($"--pagesize {pageSize} ");

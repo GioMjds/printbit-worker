@@ -69,7 +69,7 @@ public sealed class Naps2ScannerServiceTests : IDisposable
     [InlineData("glass", "A4", "--pagesize 216x297mm")]
     [InlineData("feeder", "A4", "--pagesize a4")]
     [InlineData("feeder", "Letter", "--pagesize letter")]
-    [InlineData("feeder", "Legal", "--pagesize legal")]
+    [InlineData("feeder", "Legal", "--pagesize 216x330mm")]
     public void BuildNaps2Args_UsesDeterministicPageSize(
         string source, string paperSize, string expectedPageSize)
     {

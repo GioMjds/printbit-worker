@@ -716,6 +716,10 @@ public sealed class WorkerCommandPipeHostedService : BackgroundService
             {
                 serviceResult = await _recoveryService.AttemptRepairAsync(cancellationToken);
             }
+            else if (command.Type == PrinterRecoveryCommandType.RestartPrintSpooler)
+            {
+                serviceResult = await _recoveryService.RestartSpoolerAsync(command.PrinterName, cancellationToken);
+            }
             else
             {
                 serviceResult = new PrinterRecoveryResult

@@ -89,7 +89,7 @@ public sealed class DocumentPreprocessorTests
             Assert.Equal(1, prepared.PageCount);
             using var result = PdfReader.Open(prepared.FilePath, PdfDocumentOpenMode.Import);
             Assert.Equal(1, result.PageCount);
-            Assert.Equal(1008, result.Pages[0].Width.Point);
+            Assert.Equal(936, result.Pages[0].Width.Point);
             Assert.Equal(612, result.Pages[0].Height.Point);
             Assert.Equal(0, result.Pages[0].Rotate);
         }
@@ -131,7 +131,7 @@ public sealed class DocumentPreprocessorTests
             using var result = PdfReader.Open(prepared.FilePath, PdfDocumentOpenMode.Import);
             Assert.Equal(1, result.PageCount);
             Assert.Equal(612, result.Pages[0].Width.Point);
-            Assert.Equal(1008, result.Pages[0].Height.Point);
+            Assert.Equal(936, result.Pages[0].Height.Point);
             Assert.Equal(0, result.Pages[0].Rotate);
         }
         finally

@@ -28,6 +28,7 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
     private bool? _lastOfflineState = null;
     private string? _lastErrorState = null;
     private WorkerPrintEvent? _pendingEvent;
+    private DateTimeOffset? _lastHeartbeatSentAt;
     
     private int _fatalErrorCode = 0;
     private string _fatalErrorMessage = string.Empty;
@@ -577,6 +578,30 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
         if (_pendingEvent is not null && await _eventPipe.SendAsync(_pendingEvent, stoppingToken))
         {
             _pendingEvent = null;
+            _lastHeartbeatSentAt = DateTimeOffset.UtcNow;
+        }
+        else if (_pendingEvent is null)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var heartbeatInterval = TimeSpan.FromSeconds(15);
+            if (_lastHeartbeatSentAt is null || (now - _lastHeartbeatSentAt.Value) >= heartbeatInterval)
+            {
+                var isOnline = foundPrinter && !isOffline && _fatalErrorCode == 0;
+                var heartbeat = new WorkerPrintEvent
+                {
+                    Type = WorkerPrintEventType.PrinterStatusSnapshot,
+                    PrinterName = _hardwareSettings.PrinterName,
+                    Message = isOnline
+                        ? "Printer is online"
+                        : (foundPrinter ? $"Printer unhealthy: {_fatalErrorMessage}" : $"Printer queue '{_hardwareSettings.PrinterName}' not found"),
+                    TimestampUtc = now.UtcDateTime
+                };
+
+                if (await _eventPipe.PublishAsync(heartbeat, stoppingToken))
+                {
+                    _lastHeartbeatSentAt = now;
+                }
+            }
         }
     }
 

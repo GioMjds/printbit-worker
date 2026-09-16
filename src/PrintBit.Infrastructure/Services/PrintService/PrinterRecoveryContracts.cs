@@ -9,7 +9,10 @@ public enum PrinterRecoveryCommandType
     GetPrinterRecoveryStatus,
 
     [JsonStringEnumMemberName("AttemptPrinterRecovery")]
-    AttemptPrinterRecovery
+    AttemptPrinterRecovery,
+
+    [JsonStringEnumMemberName("RestartPrintSpooler")]
+    RestartPrintSpooler
 }
 
 public enum PrinterRecoveryOutcome
@@ -44,6 +47,7 @@ public sealed class PrinterRecoveryCommand
 {
     public string RequestId { get; init; } = string.Empty;
     public PrinterRecoveryCommandType Type { get; init; }
+    public string? PrinterName { get; init; }
     public DateTime TimestampUtc { get; init; }
 }
 

@@ -43,102 +43,170 @@ public sealed class DocumentConversionPipeHostedService : BackgroundService
             "Document conversion pipe listener starting on {pipe}",
             _settings.PipeName);
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                await using var server = NamedPipeServerFactory.CreateForCurrentUserAndAdministrators(
-                    _settings.PipeName,
-                    PipeDirection.InOut,
-                    maxNumberOfServerInstances: 1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+        var activeHandlers = new HashSet<Task>();
+        var handlersLock = new object();
+        NamedPipeServerStream? listeningServer = null;
 
+        try
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
                 try
                 {
-                    await server.WaitForConnectionAsync(stoppingToken);
+                    listeningServer ??= CreateListeningServer();
+                    await listeningServer.WaitForConnectionAsync(stoppingToken);
+
+                    var connectedServer = listeningServer;
+                    listeningServer = CreateListeningServer();
+
+                    var handler = HandleConnectedClientAsync(
+                        connectedServer,
+                        stoppingToken);
+                    TrackHandler(handler, activeHandlers, handlersLock);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
                     break;
                 }
-
-                _logger.LogInformation("Document conversion pipe client connected");
-
-                try
+                catch (UnauthorizedAccessException ex)
                 {
-                    await ProcessRequestStreamAsync(server, server, stoppingToken);
-
-                    if (server.IsConnected && OperatingSystem.IsWindows())
-                    {
-                        try
-                        {
-                            using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                            drainCts.CancelAfter(TimeSpan.FromSeconds(2));
-                            await Task.Run(server.WaitForPipeDrain, drainCts.Token);
-                        }
-                        catch (Exception)
-                        {
-                            // Drain timeout or client already disconnected; proceed to disconnect
-                        }
-                    }
-                }
-                catch (IOException ex)
-                {
-                    _logger.LogInformation(
+                    _logger.LogWarning(
                         ex,
-                        "Document conversion pipe client disconnected prematurely on {pipe}",
+                        "Document conversion pipe at {pipe} is already in use or access was denied. Retrying in 5 seconds...",
                         _settings.PipeName);
-                }
-                finally
-                {
-                    if (server.IsConnected)
+
+                    listeningServer?.Dispose();
+                    listeningServer = null;
+
+                    try
                     {
-                        server.Disconnect();
+                        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
                     }
                 }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        ex,
+                        "Unexpected error in document conversion pipe listener on {pipe}. Retrying in 1 second...",
+                        _settings.PipeName);
+
+                    listeningServer?.Dispose();
+                    listeningServer = null;
+
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            listeningServer?.Dispose();
+
+            Task[] handlers;
+            lock (handlersLock)
+            {
+                handlers = activeHandlers.ToArray();
+            }
+
+            try
+            {
+                await Task.WhenAll(handlers);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                break;
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Document conversion pipe at {pipe} is already in use or access was denied. Retrying in 5 seconds...",
-                    _settings.PipeName);
-
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(
-                    ex,
-                    "Unexpected error in document conversion pipe listener on {pipe}. Retrying in 1 second...",
-                    _settings.PipeName);
-
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
+                // Normal host shutdown.
             }
         }
 
         _logger.LogInformation(
             "Document conversion pipe listener stopped on {pipe}",
             _settings.PipeName);
+    }
+
+    private NamedPipeServerStream CreateListeningServer()
+    {
+        return NamedPipeServerFactory.Create(
+            _settings.PipeName,
+            PipeDirection.InOut,
+            maxNumberOfServerInstances: NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+    }
+
+    private async Task HandleConnectedClientAsync(
+        NamedPipeServerStream server,
+        CancellationToken stoppingToken)
+    {
+        await using (server)
+        {
+            _logger.LogInformation("Document conversion pipe client connected");
+
+            try
+            {
+                await ProcessRequestStreamAsync(server, server, stoppingToken);
+
+                if (server.IsConnected && OperatingSystem.IsWindows())
+                {
+                    try
+                    {
+                        using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                        drainCts.CancelAfter(TimeSpan.FromSeconds(2));
+                        await Task.Run(server.WaitForPipeDrain, drainCts.Token);
+                    }
+                    catch (Exception)
+                    {
+                        // Drain timeout or client already disconnected; proceed to disconnect
+                    }
+                }
+            }
+            catch (IOException ex)
+            {
+                _logger.LogInformation(
+                    ex,
+                    "Document conversion pipe client disconnected prematurely on {pipe}",
+                    _settings.PipeName);
+            }
+            finally
+            {
+                if (server.IsConnected)
+                {
+                    server.Disconnect();
+                }
+            }
+        }
+    }
+
+    private static void TrackHandler(
+        Task handler,
+        ISet<Task> activeHandlers,
+        object handlersLock)
+    {
+        lock (handlersLock)
+        {
+            activeHandlers.Add(handler);
+        }
+
+        _ = handler.ContinueWith(
+            t =>
+            {
+                lock (handlersLock)
+                {
+                    activeHandlers.Remove(t);
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     public async Task<DocumentConversionResult?> ProcessRequestStreamAsync(

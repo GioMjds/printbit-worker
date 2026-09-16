@@ -66,9 +66,10 @@ public sealed class JobOrchestrator : IJobOrchestrator
             Orientation = request.Settings.Orientation,
             RotationDeg = 0,
             PaperSize = request.Settings.PaperSize,
-            // Preparation already applies the customer's Fit/Actual layout.
-            // Keep the target-sized PDF at 1:1 to avoid a second shrink.
-            Scaling = "actual",
+            // Pass the customer's scaling preference (defaults to "fit"), so SumatraPDF
+            // fits the page to the printer's printable margins (matching driver "Fit to Page")
+            // and avoids physical hardware border cutouts.
+            Scaling = request.Settings.Scaling,
             PageRange = null,
             Duplex = false
         };

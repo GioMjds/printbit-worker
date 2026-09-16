@@ -63,7 +63,7 @@ public class DocumentPrinterTests
         Assert.Equal("EPSON L5290 Series", args[1]);
         Assert.Equal("-print-settings", args[2]);
         Assert.Equal(
-            "3x,color,1-3,paper=legal,landscape,fit,ignore-pdf-print-settings,collate",
+            "3x,color,1-3,paperkind=14,landscape,fit,ignore-pdf-print-settings,collate",
             args[3]);
         Assert.Equal("-silent", args[4]);
         Assert.Equal(@"C:\PrintBit\job.pdf", args[5]);

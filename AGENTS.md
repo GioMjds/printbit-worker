@@ -181,7 +181,9 @@ describing the detected error code. `PrinterOffline` / `PrinterOnline` are
 emitted on the WMI `WorkOffline` state change. `PrinterOnline` is also emitted
 when a previously reported hardware error clears while the configured printer
 queue remains present, so Node can leave its error projection without a USB
-replug.
+replug. Additionally, `PrinterHealthMonitor` publishes periodic `PrinterStatusSnapshot`
+heartbeats (every 15s) so the Node service syncs online/offline status promptly
+whenever Node restarts without waiting for an error or USB state change.
 
 ### Named Pipe (Node -> Service Command Pipe)
 
@@ -261,6 +263,11 @@ Windows Assigned Access restricts the kiosk account.
   exposes a public `PipeSecurity` constructor, so a more restrictive
   C# deployment would need P/Invoke to `SetSecurityInfo` on
   `SafePipeHandle`.
+- **C# document conversion pipe** (`printbit-document-conversion`): Created using
+  `NamedPipeServerFactory.Create` with Windows ACL granting `FullControl` to current identity,
+  `ReadWrite | CreateNewInstance` to `AuthenticatedUserSid`, and `ReadWrite` to `WorldSid`.
+  Uses a replacement-server listener pattern (`MaxAllowedServerInstances`) so the pipe
+  remains continuously available during conversions without dropping connection attempts.
 - **C# worker command pipe** (`printbit-worker-commands`): Created using
   `NamedPipeServerStreamAcl.Create` with strict Windows `PipeSecurity` configured
   via `WorkerCommandPipeSecurity`. Grants `FullControl` to current service identity

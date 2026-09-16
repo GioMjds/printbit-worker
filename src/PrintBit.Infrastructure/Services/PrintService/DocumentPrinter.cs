@@ -176,7 +176,7 @@ public sealed class DocumentPrinter : IDocumentPrinter
             FormatPageSelection(pages)
         };
 
-        printSettings.Add($"paper={NormalizePaperSize(settings.PaperSize)}");
+        printSettings.Add(NormalizePaperSetting(settings.PaperSize));
 
         if (string.Equals(settings.Orientation, "landscape", StringComparison.OrdinalIgnoreCase))
         {
@@ -210,12 +210,15 @@ public sealed class DocumentPrinter : IDocumentPrinter
         return new Process { StartInfo = startInfo };
     }
 
-    private static string NormalizePaperSize(string? paperSize) =>
+    private static string NormalizePaperSetting(string? paperSize) =>
         paperSize?.Trim().ToLowerInvariant() switch
         {
-            "letter" => "letter",
-            "legal" => "legal",
-            _ => "A4"
+            "letter" => "paper=letter",
+            // In SumatraPDF, standard paper names do not include "8.5 x 13 in" or "folio".
+            // "paperkind=14" explicitly sets Windows DMPAPER_FOLIO (14), which maps
+            // directly to the Epson driver's "8.5 x 13 in" preset (RawKind 14).
+            "legal" or "folio" => "paperkind=14",
+            _ => "paper=A4"
         };
 
     private async Task<DocumentPrintResult> VerifySpoolerDocumentLifecycleAsync(
