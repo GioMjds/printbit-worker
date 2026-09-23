@@ -200,18 +200,23 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
         var executableToRun = File.Exists(resolvedExecutable) ? resolvedExecutable : _settings.SofficePath;
 
         await LibreOfficeGate.WaitAsync(cancellationToken);
+        string? profileDir = null;
         try
         {
-            var profileDir = string.IsNullOrWhiteSpace(_settings.UserProfileDirectory)
+            var baseProfileDir = string.IsNullOrWhiteSpace(_settings.UserProfileDirectory)
                 ? Path.Combine(Path.GetTempPath(), "printbit-lo-profile")
                 : _settings.UserProfileDirectory;
 
+            profileDir = Path.Combine(baseProfileDir, $"inst-{Guid.NewGuid():N}");
             if (!Directory.Exists(profileDir))
             {
                 Directory.CreateDirectory(profileDir);
             }
 
             var profileUri = new Uri(Path.GetFullPath(profileDir)).AbsoluteUri;
+
+            // Delete stale expected output if present to prevent returning outdated artifacts
+            try { if (File.Exists(expectedPdfPath)) File.Delete(expectedPdfPath); } catch { }
 
             var psi = new ProcessStartInfo
             {
@@ -227,6 +232,7 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
             psi.ArgumentList.Add("--nodefault");
             psi.ArgumentList.Add("--norestore");
             psi.ArgumentList.Add("--nolockcheck");
+            psi.ArgumentList.Add("--nofirststartwizard");
             psi.ArgumentList.Add($"-env:UserInstallation={profileUri}");
             psi.ArgumentList.Add("--convert-to");
             psi.ArgumentList.Add("pdf");
@@ -277,7 +283,7 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
             }
             catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {
-                try { process.Kill(entireProcessTree: true); } catch { }
+                try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
                 sw.Stop();
                 _logger.LogWarning("LibreOffice conversion for {SourcePath} timed out after {Timeout}s", request.SourcePath, timeoutSeconds);
                 return new DocumentConversionResult
@@ -291,7 +297,7 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
             }
             catch (OperationCanceledException)
             {
-                try { process.Kill(entireProcessTree: true); } catch { }
+                try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
                 throw;
             }
 
@@ -349,6 +355,18 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
         }
         finally
         {
+            if (!string.IsNullOrWhiteSpace(profileDir))
+            {
+                try
+                {
+                    if (Directory.Exists(profileDir))
+                    {
+                        Directory.Delete(profileDir, recursive: true);
+                    }
+                }
+                catch { }
+            }
+
             LibreOfficeGate.Release();
         }
     }
@@ -357,12 +375,40 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
     {
         if (string.IsNullOrWhiteSpace(configuredPath)) return configuredPath;
 
-        if (configuredPath.EndsWith("soffice.exe", StringComparison.OrdinalIgnoreCase))
+        if (File.Exists(configuredPath))
         {
-            var comPath = configuredPath.Substring(0, configuredPath.Length - 4) + ".com";
-            if (File.Exists(comPath))
+            if (configuredPath.EndsWith("soffice.exe", StringComparison.OrdinalIgnoreCase))
             {
-                return comPath;
+                var comPath = configuredPath.Substring(0, configuredPath.Length - 4) + ".com";
+                if (File.Exists(comPath))
+                {
+                    return comPath;
+                }
+            }
+            return configuredPath;
+        }
+
+        var isStandardOrBareName =
+            string.Equals(configuredPath, @"C:\Program Files\LibreOffice\program\soffice.exe", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(configuredPath, "soffice.exe", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(configuredPath, "soffice", StringComparison.OrdinalIgnoreCase);
+
+        if (isStandardOrBareName)
+        {
+            var commonCandidates = new[]
+            {
+                @"C:\Program Files\LibreOffice\program\soffice.com",
+                @"C:\Program Files\LibreOffice\program\soffice.exe",
+                @"C:\Program Files (x86)\LibreOffice\program\soffice.com",
+                @"C:\Program Files (x86)\LibreOffice\program\soffice.exe"
+            };
+
+            foreach (var candidate in commonCandidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
             }
         }
 
