@@ -65,7 +65,7 @@ public sealed class JobOrchestrator : IJobOrchestrator
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Document preprocessing failed for {file}", request.FilePath);
-            var startedAt = DateTime.UtcNow;
+            var failedAt = DateTime.UtcNow;
             await SendEventAsync(new WorkerPrintEvent
             {
                 Type = WorkerPrintEventType.PrintFailed,
@@ -76,12 +76,12 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 Outcome = "failed",
                 TotalPages = 0,
                 PagesPrinted = 0,
-                PageCountConfidence = PrintPageCountConfidence.Unconfirmed,
+                PageCountConfidence = PrintPageCountConfidence.Unknown,
                 TotalCopies = Math.Max(1, request.Settings.Copies),
                 TotalExpected = 0,
                 FailureStage = PrintFailureStage.Validation.ToString(),
                 Message = $"Document preprocessing failed: {ex.Message}",
-                StartedAt = startedAt,
+                StartedAt = failedAt,
                 CompletedAt = DateTime.UtcNow
             }, cancellationToken);
 
@@ -90,7 +90,7 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 $"Document preprocessing failed: {ex.Message}");
         }
 
-        using var _ = prepared;
+        using var preparedScope = prepared;
         var totalCopies = Math.Max(1, request.Settings.Copies);
         var dispatchSettings = new PrintJobSettings
         {

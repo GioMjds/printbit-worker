@@ -51,11 +51,11 @@ public class PrintQueueWatcher : BackgroundService
                     if (_processingFiles.Contains(jsonFile) || !IsPrintJobSidecar(jsonFile)) continue;
 
                     _processingFiles.Add(jsonFile);
+                    var pdfFile = Path.ChangeExtension(jsonFile, ".pdf");
                     try
                     {
                         await Task.Delay(1000, stoppingToken);
 
-                        var pdfFile = Path.ChangeExtension(jsonFile, ".pdf");
                         if (!File.Exists(pdfFile))
                         {
                             _logger.LogWarning("Found JSON sidecar {jsonFile} but missing PDF file. Moving to failed.", jsonFile);
