@@ -113,6 +113,18 @@ public class PrintQueueWatcher : BackgroundService
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Failed to process queue file {file}", jsonFile);
+                        try
+                        {
+                            if (File.Exists(pdfFile))
+                            {
+                                File.Move(pdfFile, Path.Combine(failedDirectory, Path.GetFileName(pdfFile)), true);
+                            }
+                            if (File.Exists(jsonFile))
+                            {
+                                File.Move(jsonFile, Path.Combine(failedDirectory, Path.GetFileName(jsonFile)), true);
+                            }
+                        }
+                        catch { }
                     }
                     finally
                     {

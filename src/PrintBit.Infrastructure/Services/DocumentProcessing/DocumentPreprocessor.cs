@@ -1,12 +1,22 @@
+using System.Diagnostics;
+using Microsoft.Extensions.Options;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using PrintBit.Infrastructure.Services.PrintService;
+using PrintBit.Shared.Configurations;
 
 namespace PrintBit.Infrastructure.Services.DocumentProcessing;
 
 public sealed class DocumentPreprocessor : IDocumentPreprocessor
 {
+    private readonly string? _qpdfPath;
+
+    public DocumentPreprocessor(IOptions<HardwareSettings>? hardwareOptions = null)
+    {
+        _qpdfPath = hardwareOptions?.Value?.QpdfPath;
+    }
+
     public Task<PreparedDocument> PrepareAsync(
         string sourcePath,
         PrintJobSettings settings,
@@ -37,52 +47,126 @@ public sealed class DocumentPreprocessor : IDocumentPreprocessor
         }
     }
 
-    private static int PreparePdf(
+    private int PreparePdf(
         string sourcePath,
         string outputPath,
         PrintJobSettings settings,
         CancellationToken cancellationToken)
     {
-        using var form = XPdfForm.FromFile(sourcePath);
-        using var output = new PdfDocument();
-        var selectedPages = SelectPages(form.PageCount, settings.PageRange);
-        foreach (var pageNumber in selectedPages)
+        string workingPath = sourcePath;
+        string? tempDecompressed = null;
+        XPdfForm? form = null;
+
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            form.PageNumber = pageNumber;
-
-            var page = output.AddPage();
-            SetPaperGeometry(page, settings.PaperSize, settings.Orientation);
-
-            var sourcePage = form.Page ?? throw new InvalidDataException("PDF page is missing");
-            var originalMediaBox = sourcePage.MediaBox;
-            var pageNativeRotation = sourcePage.Rotate;
-            var totalRotation = NormalizeRotation(pageNativeRotation + settings.RotationDeg);
             try
             {
-                // PDFsharp imports /Rotate and uses MediaBox as the form's clipping
-                // box. Normalize both so the visible page matches PDF.js and rotation
-                // is applied exactly once by our outer layout transform.
-                sourcePage.Rotate = 0;
-                sourcePage.MediaBox = VisibleBox(originalMediaBox, sourcePage.CropBox);
-                RenderFormToPage(XGraphics.FromPdfPage(page), form, page, totalRotation, settings);
+                form = XPdfForm.FromFile(workingPath);
             }
-            finally
+            catch
             {
-                sourcePage.MediaBox = originalMediaBox;
-                sourcePage.Rotate = pageNativeRotation;
+                var qpdf = PdfPageCounter.ResolveQpdfPath(_qpdfPath);
+                if (qpdf != null)
+                {
+                    tempDecompressed = Path.Combine(
+                        Path.GetTempPath(),
+                        $"printbit-qpdf-decomp-{Guid.NewGuid():N}.pdf");
+
+                    if (TryDecompressWithQpdf(qpdf, workingPath, tempDecompressed))
+                    {
+                        workingPath = tempDecompressed;
+                        try
+                        {
+                            form = XPdfForm.FromFile(workingPath);
+                        }
+                        catch { }
+                    }
+                }
+
+                if (form == null)
+                {
+                    // Fallback: pass-through original file if PDFsharp cannot parse it
+                    File.Copy(sourcePath, outputPath, true);
+                    return PdfPageCounter.Count(sourcePath, _qpdfPath) ?? 1;
+                }
+            }
+
+            using (form)
+            using (var output = new PdfDocument())
+            {
+                output.Info.Title = Path.GetFileName(outputPath);
+                var selectedPages = SelectPages(form.PageCount, settings.PageRange);
+                foreach (var pageNumber in selectedPages)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    form.PageNumber = pageNumber;
+
+                    var page = output.AddPage();
+                    SetPaperGeometry(page, settings.PaperSize, settings.Orientation);
+
+                    var sourcePage = form.Page ?? throw new InvalidDataException("PDF page is missing");
+                    var originalMediaBox = sourcePage.MediaBox;
+                    var pageNativeRotation = sourcePage.Rotate;
+                    var totalRotation = NormalizeRotation(pageNativeRotation + settings.RotationDeg);
+                    try
+                    {
+                        // PDFsharp imports /Rotate and uses MediaBox as the form's clipping
+                        // box. Normalize both so the visible page matches PDF.js and rotation
+                        // is applied exactly once by our outer layout transform.
+                        sourcePage.Rotate = 0;
+                        sourcePage.MediaBox = VisibleBox(originalMediaBox, sourcePage.CropBox);
+                        RenderFormToPage(XGraphics.FromPdfPage(page), form, page, totalRotation, settings);
+                    }
+                    finally
+                    {
+                        sourcePage.MediaBox = originalMediaBox;
+                        sourcePage.Rotate = pageNativeRotation;
+                    }
+                }
+
+                if (settings.Duplex && output.PageCount % 2 == 1)
+                {
+                    var blank = output.AddPage();
+                    SetPaperGeometry(blank, settings.PaperSize, settings.Orientation);
+                }
+
+                var outputPageCount = output.PageCount;
+                output.Save(outputPath);
+                return outputPageCount;
             }
         }
-
-        if (settings.Duplex && output.PageCount % 2 == 1)
+        finally
         {
-            var blank = output.AddPage();
-            SetPaperGeometry(blank, settings.PaperSize, settings.Orientation);
+            if (tempDecompressed != null)
+            {
+                try { File.Delete(tempDecompressed); } catch { }
+            }
         }
+    }
 
-        var outputPageCount = output.PageCount;
-        output.Save(outputPath);
-        return outputPageCount;
+    private static bool TryDecompressWithQpdf(string qpdfExe, string inputPdf, string outputPdf)
+    {
+        try
+        {
+            using var proc = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = qpdfExe,
+                    Arguments = $"--object-streams=disable \"{inputPdf}\" \"{outputPdf}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+            proc.Start();
+            return proc.WaitForExit(10000) && proc.ExitCode == 0 && File.Exists(outputPdf);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void RenderFormToPage(XGraphics graphics, XPdfForm form, PdfPage page, int rotation, PrintJobSettings settings)

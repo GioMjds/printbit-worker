@@ -54,10 +54,43 @@ public sealed class JobOrchestrator : IJobOrchestrator
                 "Filename does not match the tx_spool layout");
         }
 
-        using var prepared = await _documentPreprocessor.PrepareAsync(
-            request.FilePath,
-            request.Settings,
-            cancellationToken);
+        PreparedDocument prepared;
+        try
+        {
+            prepared = await _documentPreprocessor.PrepareAsync(
+                request.FilePath,
+                request.Settings,
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Document preprocessing failed for {file}", request.FilePath);
+            var startedAt = DateTime.UtcNow;
+            await SendEventAsync(new WorkerPrintEvent
+            {
+                Type = WorkerPrintEventType.PrintFailed,
+                TransactionId = transactionId,
+                SpoolerCorrelationKey = spoolerCorrelationKey,
+                PrinterName = request.PrinterName,
+                FileName = fileName,
+                Outcome = "failed",
+                TotalPages = 0,
+                PagesPrinted = 0,
+                PageCountConfidence = PrintPageCountConfidence.Unconfirmed,
+                TotalCopies = Math.Max(1, request.Settings.Copies),
+                TotalExpected = 0,
+                FailureStage = PrintFailureStage.Validation.ToString(),
+                Message = $"Document preprocessing failed: {ex.Message}",
+                StartedAt = startedAt,
+                CompletedAt = DateTime.UtcNow
+            }, cancellationToken);
+
+            return PrintJobResult.Failed(
+                PrintFailureStage.Validation,
+                $"Document preprocessing failed: {ex.Message}");
+        }
+
+        using var _ = prepared;
         var totalCopies = Math.Max(1, request.Settings.Copies);
         var dispatchSettings = new PrintJobSettings
         {

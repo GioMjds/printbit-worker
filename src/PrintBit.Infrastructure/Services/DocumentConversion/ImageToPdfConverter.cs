@@ -223,10 +223,10 @@ public static class ImageToPdfConverter
         // xref table
         long startXref = ms.Position;
         writer.Write(Encoding.ASCII.GetBytes("xref\n0 6\n"));
-        writer.Write(Encoding.ASCII.GetBytes("0000000000 65535 f \r\n"));
+        writer.Write(Encoding.ASCII.GetBytes("0000000000 65535 f\r\n"));
         for (int i = 1; i <= 5; i++)
         {
-            string entry = string.Format(culture, "{0:D10} 00000 n \r\n", objectOffsets[i]);
+            string entry = string.Format(culture, "{0:D10} 00000 n\r\n", objectOffsets[i]);
             writer.Write(Encoding.ASCII.GetBytes(entry));
         }
 

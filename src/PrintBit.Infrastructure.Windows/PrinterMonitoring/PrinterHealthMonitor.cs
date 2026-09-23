@@ -291,6 +291,8 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                 "SELECT Name, Document, StatusMask, JobStatus, JobId, PagesPrinted, TotalPages FROM Win32_PrintJob");
 
             using var results = searcher.Get();
+            (bool JobExists, uint StatusMask, string JobStatus, int PagesPrinted, int TotalPages, string? JobId)? fallback = null;
+
             foreach (ManagementObject job in results.Cast<ManagementObject>())
             {
                 try
@@ -298,21 +300,33 @@ public class PrinterHealthMonitor : BackgroundService, IPrinterHealthMonitor
                     var jobName = job["Name"]?.ToString() ?? string.Empty;
                     var document = job["Document"]?.ToString() ?? string.Empty;
 
-                    if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase) &&
-                        document.Contains(documentName, StringComparison.OrdinalIgnoreCase))
+                    if (jobName.StartsWith(printerName, StringComparison.OrdinalIgnoreCase))
                     {
                         var mask = Convert.ToUInt32(job["StatusMask"] ?? 0u);
                         var status = job["JobStatus"]?.ToString() ?? string.Empty;
                         var printed = Convert.ToInt32(job["PagesPrinted"] ?? 0);
                         var total = Convert.ToInt32(job["TotalPages"] ?? 0);
                         var jobId = Convert.ToUInt32(job["JobId"] ?? 0u).ToString();
-                        return (true, mask, status, printed, total, jobId);
+
+                        if (string.IsNullOrEmpty(documentName) ||
+                            document.Contains(documentName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return (true, mask, status, printed, total, jobId);
+                        }
+
+                        // Fallback: active job on this printer when document title differs from file name
+                        fallback ??= (true, mask, status, printed, total, jobId);
                     }
                 }
                 finally
                 {
                     job.Dispose();
                 }
+            }
+
+            if (fallback.HasValue)
+            {
+                return fallback.Value;
             }
         }
         catch (Exception ex)

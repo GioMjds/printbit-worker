@@ -131,7 +131,7 @@ internal static class PdfPageCounter
         return null;
     }
 
-    private static string? ResolveQpdfPath(string? qpdfPath)
+    internal static string? ResolveQpdfPath(string? qpdfPath = null)
     {
         if (!string.IsNullOrWhiteSpace(qpdfPath) && File.Exists(qpdfPath))
         {
@@ -147,6 +147,16 @@ internal static class PdfPageCounter
         foreach (var loc in standardLocations)
         {
             if (File.Exists(loc)) return loc;
+        }
+
+        var pathEnv = Environment.GetEnvironmentVariable("PATH");
+        if (!string.IsNullOrEmpty(pathEnv))
+        {
+            foreach (var dir in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var candidate = Path.Combine(dir.Trim(), "qpdf.exe");
+                if (File.Exists(candidate)) return candidate;
+            }
         }
 
         return null;
