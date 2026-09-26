@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
+using PrintBit.Infrastructure.Services.DocumentConversion;
 using PrintBit.Infrastructure.Services.PrintService;
 using PrintBit.Shared.Configurations;
 
@@ -11,13 +12,17 @@ namespace PrintBit.Infrastructure.Services.DocumentProcessing;
 public sealed class DocumentPreprocessor : IDocumentPreprocessor
 {
     private readonly string? _qpdfPath;
+    private readonly IDocumentConversionService? _conversionService;
 
-    public DocumentPreprocessor(IOptions<HardwareSettings>? hardwareOptions = null)
+    public DocumentPreprocessor(
+        IOptions<HardwareSettings>? hardwareOptions = null,
+        IDocumentConversionService? conversionService = null)
     {
         _qpdfPath = hardwareOptions?.Value?.QpdfPath;
+        _conversionService = conversionService;
     }
 
-    public Task<PreparedDocument> PrepareAsync(
+    public async Task<PreparedDocument> PrepareAsync(
         string sourcePath,
         PrintJobSettings settings,
         CancellationToken cancellationToken)
@@ -31,18 +36,44 @@ public sealed class DocumentPreprocessor : IDocumentPreprocessor
         var outputPath = Path.Combine(
             Path.GetTempPath(),
             $"printbit-prepared-{Guid.NewGuid():N}.pdf");
+        string? tempConvertedPdf = null;
         try
         {
             var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
+            string effectivePdfPath = sourcePath;
+
+            if (extension != ".pdf" && (extension == ".docx" || extension == ".doc" || extension == ".odt" || extension == ".rtf" || extension == ".txt") && _conversionService != null)
+            {
+                var convResult = await _conversionService.ConvertAsync(new DocumentConversionRequest
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    SourcePath = sourcePath,
+                    OutputDirectory = Path.GetTempPath(),
+                    TargetFormat = "pdf"
+                }, cancellationToken);
+
+                if (convResult.Success && !string.IsNullOrEmpty(convResult.OutputPath) && File.Exists(convResult.OutputPath))
+                {
+                    tempConvertedPdf = convResult.OutputPath;
+                    effectivePdfPath = tempConvertedPdf;
+                    extension = ".pdf";
+                }
+            }
+
             var pageCount = extension == ".pdf"
-                ? PreparePdf(sourcePath, outputPath, settings, cancellationToken)
+                ? PreparePdf(effectivePdfPath, outputPath, settings, cancellationToken)
                 : PrepareImage(sourcePath, outputPath, settings);
-            return Task.FromResult<PreparedDocument>(
-                new PreparedDocument(outputPath, pageCount, [outputPath]));
+
+            var cleanupList = tempConvertedPdf != null
+                ? new[] { outputPath, tempConvertedPdf }
+                : new[] { outputPath };
+
+            return new PreparedDocument(outputPath, pageCount, cleanupList);
         }
         catch
         {
             try { File.Delete(outputPath); } catch { }
+            if (tempConvertedPdf != null) { try { File.Delete(tempConvertedPdf); } catch { } }
             throw;
         }
     }

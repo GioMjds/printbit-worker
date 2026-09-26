@@ -401,6 +401,10 @@ public class HardwareOrchestrator : IHardwareOrchestrator, IDisposable
                         "Coin pulse received: {PulseToken} (source: {Source})",
                         denomination,
                         "ESP32");
+                    if (int.TryParse(denomination, out var amount) && amount > 0)
+                    {
+                        OnCoinAccepted(this, amount);
+                    }
                 }
             }
         }

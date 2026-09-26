@@ -276,10 +276,14 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
 
             var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            string stdout = string.Empty;
+            string stderr = string.Empty;
 
             try
             {
-                await process.WaitForExitAsync(linkedCts.Token);
+                await Task.WhenAll(process.WaitForExitAsync(linkedCts.Token), stdoutTask, stderrTask);
+                stdout = await stdoutTask;
+                stderr = await stderrTask;
             }
             catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {
@@ -300,9 +304,6 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
                 try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
                 throw;
             }
-
-            var stdout = await stdoutTask;
-            var stderr = await stderrTask;
 
             if (process.ExitCode != 0)
             {
