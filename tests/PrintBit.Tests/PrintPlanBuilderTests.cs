@@ -1,7 +1,7 @@
 using PrintBit.Infrastructure.Services.PrintService;
 using Xunit;
 
-namespace PrintBit.Infrastructure.Tests;
+namespace PrintBit.Tests;
 
 public class PrintPlanBuilderTests
 {
