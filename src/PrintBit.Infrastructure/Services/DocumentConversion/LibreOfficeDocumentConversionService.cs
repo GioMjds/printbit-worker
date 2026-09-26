@@ -104,6 +104,26 @@ public sealed class LibreOfficeDocumentConversionService : IDocumentConversionSe
             outputDir,
             Path.GetFileNameWithoutExtension(request.SourcePath) + ".pdf");
 
+        if (ext == ".pdf")
+        {
+            if (!string.Equals(Path.GetFullPath(request.SourcePath), Path.GetFullPath(expectedPdfPath), StringComparison.OrdinalIgnoreCase))
+            {
+                File.Copy(request.SourcePath, expectedPdfPath, overwrite: true);
+            }
+
+            var pageCount = PdfPageCounter.Count(expectedPdfPath);
+            sw.Stop();
+            return new DocumentConversionResult
+            {
+                RequestId = request.RequestId,
+                Success = true,
+                OutputPath = expectedPdfPath,
+                PageCount = pageCount,
+                SourceFormat = sourceFormat,
+                DurationMs = sw.ElapsedMilliseconds
+            };
+        }
+
         // 1. Image formats -> Native C# ImageToPdfConverter
         if (ImageExtensions.Contains(ext))
         {
