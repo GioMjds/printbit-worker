@@ -126,8 +126,8 @@ public sealed class DocumentPreprocessor : IDocumentPreprocessor
             using (var output = new PdfDocument())
             {
                 output.Info.Title = Path.GetFileName(outputPath);
-                var selectedPages = SelectPages(form.PageCount, settings.PageRange);
-                foreach (var pageNumber in selectedPages)
+                var plan = PrintPlanBuilder.Build(form.PageCount, settings);
+                foreach (var pageNumber in plan.SelectedPages)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     form.PageNumber = pageNumber;
